@@ -420,3 +420,42 @@ test "load devices/dualsense.toml succeeds" {
     try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
     try std.testing.expectEqualStrings("usb", cfg.report[0].name);
 }
+
+test "dualsense.toml report field count" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/dualsense.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    const fields = cfg.report[0].fields orelse return error.NoFields;
+    // left_x, left_y, right_x, right_y, lt, rt,
+    // gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z,
+    // sensor_timestamp, touch0_contact, touch1_contact, battery_raw = 16
+    try std.testing.expectEqual(@as(usize, 16), fields.map.count());
+}
+
+test "dualsense.toml commands count" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/dualsense.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    const cmds = cfg.commands orelse return error.NoCommands;
+    // rumble + led = 2
+    try std.testing.expectEqual(@as(usize, 2), cmds.map.count());
+}
+
+test "dualsense.toml output axes and buttons count" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/dualsense.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    const out = cfg.output orelse return error.NoOutput;
+    const axes = out.axes orelse return error.NoAxes;
+    const buttons = out.buttons orelse return error.NoButtons;
+    // left_x, left_y, right_x, right_y, lt, rt = 6
+    try std.testing.expectEqual(@as(usize, 6), axes.map.count());
+    // A, B, X, Y, LB, RB, Select, Start, Home, LS, RS, TouchPad, Mic = 13
+    try std.testing.expectEqual(@as(usize, 13), buttons.map.count());
+}

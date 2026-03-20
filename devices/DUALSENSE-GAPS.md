@@ -1,7 +1,16 @@
 # DualSense DSL Coverage Gaps
 
 DSL overall coverage: ~75%. Core gamepad input (sticks, triggers, buttons, IMU) is fully covered.
-Five features cannot be expressed in Phase 1 DSL.
+Six features cannot be fully expressed in Phase 1 DSL.
+
+## Gap 0: D-Pad hat8 decoding
+
+The D-Pad is encoded as a hat-switch nibble in bits[3:0] of byte 8 (values 0=N, 1=NE, …, 7=NW,
+8=neutral). The DSL `lookup` transform can map the 4-bit hat value to four individual directional
+buttons, so this mapping is **declarable in principle**. However the path requires Phase 2 mapper
+support: `bits = [8, 0, 4]` to extract the nibble (single-byte, within Phase 1 range), then a
+`lookup` table producing four dpad outputs. The engine-side hat→dpad[4] fanout is not yet
+implemented. The field is omitted from `dualsense.toml` until the mapper supports hat8→dpad fanout.
 
 ## Gap 1: Touchpad 12-bit cross-byte bit-fields
 

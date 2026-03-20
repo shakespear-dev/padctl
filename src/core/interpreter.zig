@@ -680,7 +680,7 @@ fn makeDualSenseSample() [64]u8 {
     raw[1] = 0x00; // left_x = 0 → scale → -32768
     raw[2] = 0xFF; // left_y = 255 → scale → 32767 → negate → -32767
     raw[3] = 0xFF; // right_x = 255 → scale → 32767
-    raw[4] = 0x00; // right_y = 0 → scale → -32768 → negate → 32768 (clamped to i16 max by @truncate)
+    raw[4] = 0x00; // right_y = 0 → scale → -32768 → negate → 32768 → wraps to -32768 via @truncate
     raw[5] = 0xC0; // lt = 192
     raw[6] = 0x80; // rt = 128
     // byte 8: bit4=Square(X), bit5=Cross(A)
@@ -727,6 +727,89 @@ test "DualSense USB report: axes, triggers, IMU, buttons" {
     try testing.expect(btns & (@as(u32, 1) << x_bit) != 0); // Square pressed
     try testing.expect(btns & (@as(u32, 1) << a_bit) != 0); // Cross pressed
     try testing.expect(btns & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.B)))) == 0); // Circle not pressed
+}
+
+test "DualSense right_y=0x00 wraps to -32768 via @truncate" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    raw[4] = 0x00; // right_y=0 → scale(-32768,32767) → -32768 → negate → 32768 → wraps to -32768
+    const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, -32768), delta.ry);
+}
+
+test "DualSense joystick boundary values" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // 0x80 center: scale(128, u8_max=255) = 128*65535/255 - 32768 ≈ 128*257 - 32768 = 32896 - 32768 = 128
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    raw[1] = 0x80; // left_x = 0x80
+    const d1 = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, 128), d1.ax);
+
+    // 0xFF max: scale(255, u8_max=255) = 255*65535/255 - 32768 = 65535 - 32768 = 32767
+    raw[1] = 0xFF;
+    const d2 = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, 32767), d2.ax);
+
+    // 0x00 min: scale(0, u8_max=255) = 0 - 32768 = -32768
+    raw[1] = 0x00;
+    const d3 = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+    try testing.expectEqual(@as(?i16, -32768), d3.ax);
+}
+
+test "DualSense L1+R1 simultaneously pressed" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    // byte 9: L1=bit0, R1=bit1 → 0x03
+    raw[9] = 0x03;
+    const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+    const btns = delta.buttons orelse return error.NoBtns;
+    const lb_bit: u5 = @intCast(@intFromEnum(ButtonId.LB));
+    const rb_bit: u5 = @intCast(@intFromEnum(ButtonId.RB));
+    try testing.expect(btns & (@as(u32, 1) << lb_bit) != 0);
+    try testing.expect(btns & (@as(u32, 1) << rb_bit) != 0);
+}
+
+test "DualSense all buttons released" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    // bytes 8-10 = 0x00 → no buttons pressed
+    const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+    const btns = delta.buttons orelse 0;
+    try testing.expectEqual(@as(u32, 0), btns);
+}
+
+test "DualSense battery and touchpad fields parse without error" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    // battery_raw at offset 53: level=8 (80%), charging state=1 (charging) → 0x18
+    raw[53] = 0x18;
+    // touch0_contact at offset 33: finger_id=5, active (bit7=0) → 0x05
+    raw[33] = 0x05;
+    // touch1_contact at offset 37: inactive (bit7=1) → 0x80
+    raw[37] = 0x80;
+    // processReport must succeed; battery/touch fields silently pass through
+    _ = try interp.processReport(3, &raw);
 }
 
 test "button_group batch extraction" {
