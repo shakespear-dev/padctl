@@ -15,14 +15,17 @@ pub const ChecksumConfig = device.ChecksumConfig;
 pub const ReportConfig = device.ReportConfig;
 pub const CommandConfig = device.CommandConfig;
 pub const AxisConfig = device.AxisConfig;
-pub const DpadConfig = device.DpadConfig;
-pub const ForceFeedbackConfig = device.ForceFeedbackConfig;
+pub const DpadOutputConfig = device.DpadOutputConfig;
+pub const FfConfig = device.FfConfig;
+pub const AuxConfig = device.AuxConfig;
 pub const OutputConfig = device.OutputConfig;
 pub const DeviceConfig = device.DeviceConfig;
 
 pub const ParseResult = device.ParseResult;
 pub const parseString = device.parseString;
 pub const parseFile = device.parseFile;
+
+const input_codes = @import("input_codes.zig");
 
 const test_toml =
     \\[device]
@@ -130,6 +133,53 @@ test "parseString: valid config" {
     try std.testing.expect(cfg.commands != null);
     try std.testing.expect(cfg.commands.?.map.contains("rumble"));
     try std.testing.expect(cfg.commands.?.map.contains("led"));
+}
+
+test "OutputConfig: parsed fields" {
+    const allocator = std.testing.allocator;
+
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    const out = result.value.output.?;
+    try std.testing.expectEqualStrings("Test Output", out.name);
+    try std.testing.expectEqual(@as(?i64, 0x3820), out.vid);
+    try std.testing.expectEqual(@as(?i64, 0x0001), out.pid);
+
+    try std.testing.expect(out.axes != null);
+    const axis = out.axes.?.map.get("left_x").?;
+    try std.testing.expectEqualStrings("ABS_X", axis.code);
+    try std.testing.expectEqual(@as(i64, -32768), axis.min);
+    try std.testing.expectEqual(@as(i64, 32767), axis.max);
+    try std.testing.expectEqual(@as(?i64, 16), axis.fuzz);
+    try std.testing.expectEqual(@as(?i64, 128), axis.flat);
+
+    try std.testing.expect(out.buttons != null);
+    const btn = out.buttons.?.map.get("A").?;
+    try std.testing.expectEqualStrings("BTN_SOUTH", btn);
+
+    try std.testing.expect(out.dpad != null);
+    try std.testing.expectEqualStrings("hat", out.dpad.?.type);
+
+    try std.testing.expect(out.force_feedback != null);
+    try std.testing.expectEqualStrings("rumble", out.force_feedback.?.type);
+    try std.testing.expectEqual(@as(?i64, 16), out.force_feedback.?.max_effects);
+}
+
+test "OutputConfig: code resolution after parse" {
+    const allocator = std.testing.allocator;
+
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    const out = result.value.output.?;
+    const axis = out.axes.?.map.get("left_x").?;
+    const code = try input_codes.resolveAbsCode(axis.code);
+    try std.testing.expectEqual(@as(u16, 0x00), code);
+
+    const btn_name = out.buttons.?.map.get("A").?;
+    const btn_code = try input_codes.resolveBtnCode(btn_name);
+    try std.testing.expectEqual(@as(u16, 0x130), btn_code);
 }
 
 test "parseFile: missing file returns error" {

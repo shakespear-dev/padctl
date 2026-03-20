@@ -78,28 +78,36 @@ pub const AxisConfig = struct {
     code: []const u8,
     min: i64,
     max: i64,
-    fuzz: i64 = 0,
-    flat: i64 = 0,
-    resolution: i64 = 0,
+    fuzz: ?i64 = null,
+    flat: ?i64 = null,
+    res: ?i64 = null,
 };
 
-pub const DpadConfig = struct {
-    type: []const u8,
+pub const DpadOutputConfig = struct {
+    type: []const u8, // "hat" | "buttons"
 };
 
-pub const ForceFeedbackConfig = struct {
-    type: []const u8,
-    max_effects: i64,
+pub const FfConfig = struct {
+    type: []const u8, // "rumble"
+    max_effects: ?i64 = null,
+};
+
+pub const AuxConfig = struct {
+    type: ?[]const u8 = null, // "mouse" | "keyboard"
+    name: ?[]const u8 = null,
+    keyboard: ?bool = null,
+    buttons: ?toml.HashMap([]const u8) = null,
 };
 
 pub const OutputConfig = struct {
     name: []const u8,
-    vid: i64,
-    pid: i64,
+    vid: ?i64 = null,
+    pid: ?i64 = null,
     axes: ?toml.HashMap(AxisConfig) = null,
     buttons: ?toml.HashMap([]const u8) = null,
-    dpad: ?DpadConfig = null,
-    force_feedback: ?ForceFeedbackConfig = null,
+    dpad: ?DpadOutputConfig = null,
+    force_feedback: ?FfConfig = null,
+    aux: ?AuxConfig = null,
 };
 
 pub const DeviceConfig = struct {
@@ -113,7 +121,6 @@ const valid_transforms = [_][]const u8{ "negate", "abs", "scale", "clamp", "dead
 
 fn isValidTransform(t: []const u8) bool {
     const name = std.mem.trim(u8, t, " \t");
-    // allow "name" or "name(args)"
     const paren = std.mem.indexOfScalar(u8, name, '(');
     const base = if (paren) |p| name[0..p] else name;
     const base_trimmed = std.mem.trim(u8, base, " \t");
@@ -142,7 +149,6 @@ fn fieldTypeSize(type_str: []const u8) ?i64 {
 
 pub fn validate(cfg: *const DeviceConfig) !void {
     for (cfg.report) |report| {
-        // check fields
         if (report.fields) |fields| {
             var seen = std.BoundedArray([]const u8, 64){};
             var it = fields.map.iterator();
@@ -150,24 +156,20 @@ pub fn validate(cfg: *const DeviceConfig) !void {
                 const name = entry.key_ptr.*;
                 const field = entry.value_ptr.*;
 
-                // duplicate field name check
                 for (seen.constSlice()) |s| {
                     if (std.mem.eql(u8, s, name)) return error.InvalidConfig;
                 }
                 seen.appendAssumeCapacity(name);
 
-                // offset bounds: offset + sizeof(type) <= report.size
                 const sz = fieldTypeSize(field.type) orelse return error.InvalidConfig;
                 if (field.offset < 0 or field.offset + sz > report.size) return error.OffsetOutOfBounds;
 
-                // transform validation
                 if (field.transform) |tr| {
                     if (!isValidTransformChain(tr)) return error.InvalidConfig;
                 }
             }
         }
 
-        // button_group button name validation
         if (report.button_group) |bg| {
             var it = bg.map.iterator();
             while (it.next()) |entry| {
@@ -176,7 +178,6 @@ pub fn validate(cfg: *const DeviceConfig) !void {
             }
         }
 
-        // checksum range in report.size
         if (report.checksum) |cs| {
             if (cs.range.len != 2) return error.InvalidConfig;
             if (cs.range[0] < 0 or cs.range[1] > report.size) return error.InvalidConfig;
@@ -184,7 +185,6 @@ pub fn validate(cfg: *const DeviceConfig) !void {
     }
 }
 
-// ParseResult wraps the toml.Parsed arena so all allocations are freed on deinit.
 pub const ParseResult = toml.Parsed(DeviceConfig);
 
 pub fn parseString(allocator: std.mem.Allocator, content: []const u8) !ParseResult {
@@ -325,8 +325,6 @@ test "offset out of bounds returns error" {
 }
 
 test "duplicate field name returns error" {
-    // zig-toml HashMap deduplicates keys (last value wins), so duplicates cannot
-    // arrive from the parser. Verify validate() passes on a well-formed config.
     const cfg = DeviceConfig{
         .device = .{
             .name = "test",
