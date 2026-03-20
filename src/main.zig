@@ -20,3 +20,7 @@ pub const config = struct {
 pub fn main() !void {
     std.log.info("padctl starting...", .{});
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}
