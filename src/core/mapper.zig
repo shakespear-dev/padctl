@@ -4,6 +4,7 @@ const toml = @import("toml");
 const mapping = @import("../config/mapping.zig");
 const state = @import("state.zig");
 const layer = @import("layer.zig");
+const gyro = @import("gyro.zig");
 
 pub const RemapTargetResolved = @import("remap.zig").RemapTargetResolved;
 pub const resolveTarget = @import("remap.zig").resolveTarget;
@@ -46,6 +47,7 @@ pub const Mapper = struct {
     layer: LayerState,
     state: GamepadState,
     prev: GamepadState,
+    gyro_proc: gyro.GyroProcessor,
     suppressed_buttons: u32,
     injected_buttons: u32,
     timer_fd: std.posix.fd_t,
@@ -57,6 +59,7 @@ pub const Mapper = struct {
             .layer = LayerState.init(allocator),
             .state = .{},
             .prev = .{},
+            .gyro_proc = .{},
             .suppressed_buttons = 0,
             .injected_buttons = 0,
             .timer_fd = timer_fd,
@@ -85,8 +88,17 @@ pub const Mapper = struct {
         // per-source inject map: null = not mapped, Some = last-write target
         const BUTTON_COUNT = @typeInfo(ButtonId).@"enum".fields.len;
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
+        var aux = AuxEventList{};
 
-        // [3] mode processing (Phase 2b stub — no suppress, zero output)
+        // [3] mode processing (gyro mouse; stick/dpad Phase 2b)
+        {
+            const gcfg = resolveGyroConfig(self.config);
+            const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
+            if (std.mem.eql(u8, gcfg.mode, "mouse")) {
+                if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
+                if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
+            }
+        }
 
         // [4] base remap: collect suppress mask + per-source inject targets
         if (self.config.remap) |remap_map| {
@@ -101,7 +113,6 @@ pub const Mapper = struct {
         }
 
         // [6] build aux + injected_buttons from per_src_inject
-        var aux = AuxEventList{};
         for (0..BUTTON_COUNT) |i| {
             const target = per_src_inject[i] orelse continue;
             const src_mask: u32 = @as(u32, 1) << @as(u5, @intCast(i));
@@ -192,6 +203,20 @@ fn collectRemapMap(
         const target = resolveTarget(entry.value_ptr.*) catch continue;
         per_src_inject[@intCast(src_idx)] = target;
     }
+}
+
+fn resolveGyroConfig(config: *const MappingConfig) gyro.GyroConfig {
+    const mc = config.gyro orelse return .{};
+    return .{
+        .mode = mc.mode,
+        .sensitivity_x = if (mc.sensitivity_x) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
+        .sensitivity_y = if (mc.sensitivity_y) |v| @floatCast(v) else if (mc.sensitivity) |v| @floatCast(v) else 1.5,
+        .deadzone = if (mc.deadzone) |v| @intCast(v) else 0,
+        .smoothing = if (mc.smoothing) |v| @floatCast(v) else 0.3,
+        .curve = if (mc.curve) |v| @floatCast(v) else 1.0,
+        .invert_x = mc.invert_x orelse false,
+        .invert_y = mc.invert_y orelse false,
+    };
 }
 
 fn emitTapEvent(target: RemapTargetResolved, aux: *AuxEventList) void {
