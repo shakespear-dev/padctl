@@ -7,58 +7,63 @@ pub fn build(b: *std.Build) void {
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
 
-    const exe = b.addExecutable(.{
-        .name = "padctl",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    exe_mod.addImport("toml", toml_mod);
+
+    const exe = b.addExecutable(.{ .name = "padctl", .root_module = exe_mod });
     exe.linkSystemLibrary("usb-1.0");
     exe.linkLibC();
     b.installArtifact(exe);
 
-    const debug_exe = b.addExecutable(.{
-        .name = "padctl-debug",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/padctl-debug.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const debug_mod = b.createModule(.{
+        .root_source_file = b.path("tools/padctl-debug.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    const debug_exe = b.addExecutable(.{ .name = "padctl-debug", .root_module = debug_mod });
     b.installArtifact(debug_exe);
 
-    const capture_exe = b.addExecutable(.{
-        .name = "padctl-capture",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/padctl-capture.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const capture_mod = b.createModule(.{
+        .root_source_file = b.path("tools/padctl-capture.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    const capture_exe = b.addExecutable(.{ .name = "padctl-capture", .root_module = capture_mod });
     b.installArtifact(capture_exe);
 
-    const test_step = b.step("test", "Run unit tests");
-    const unit_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    // test: Layer 0 + Layer 1 (CI)
+    const unit_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    unit_mod.addImport("toml", toml_mod);
+    const unit_tests = b.addTest(.{ .root_module = unit_mod });
+    unit_tests.linkSystemLibrary("usb-1.0");
+    unit_tests.linkLibC();
+    const test_step = b.step("test", "Run Layer 0 + Layer 1 tests (CI)");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
-    const spike_exe = b.addExecutable(.{
-        .name = "toml-spike",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("spike/toml_spike.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    spike_exe.root_module.addImport("toml", toml_mod);
+    // test-integration: Layer 2 (UHID, requires privilege)
+    const integration_step = b.step("test-integration", "Run Layer 2 integration tests (UHID, local)");
+    _ = integration_step;
 
+    // test-e2e: Layer 3 (real hardware)
+    const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (real hardware)");
+    _ = e2e_step;
+
+    // spike
+    const spike_mod = b.createModule(.{
+        .root_source_file = b.path("spike/toml_spike.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spike_mod.addImport("toml", toml_mod);
+    const spike_exe = b.addExecutable(.{ .name = "toml-spike", .root_module = spike_mod });
     const spike_step = b.step("spike", "Run TOML spike");
     spike_step.dependOn(&b.addRunArtifact(spike_exe).step);
 }
