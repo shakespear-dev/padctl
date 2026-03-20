@@ -15,6 +15,7 @@ pub const io = struct {
 
 pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
+    pub const e2e_test = @import("test/e2e_test.zig");
 };
 
 pub const config = struct {
