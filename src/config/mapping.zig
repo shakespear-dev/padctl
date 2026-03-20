@@ -1,11 +1,56 @@
 const std = @import("std");
 const toml = @import("toml");
 
-// Raw mapping config as parsed from TOML.
-// Remap values are raw strings; resolution happens in remap.zig.
+pub const GyroConfig = struct {
+    mode: []const u8 = "off",
+    activate: ?[]const u8 = null,
+    sensitivity: ?f64 = null,
+    sensitivity_x: ?f64 = null,
+    sensitivity_y: ?f64 = null,
+    deadzone: ?i64 = null,
+    smoothing: ?f64 = null,
+    curve: ?f64 = null,
+    invert_x: ?bool = null,
+    invert_y: ?bool = null,
+};
+
+pub const StickConfig = struct {
+    mode: []const u8 = "gamepad",
+    deadzone: ?i64 = null,
+    sensitivity: ?f64 = null,
+    suppress_gamepad: ?bool = null,
+};
+
+pub const StickPairConfig = struct {
+    left: ?StickConfig = null,
+    right: ?StickConfig = null,
+};
+
+pub const DpadConfig = struct {
+    mode: []const u8 = "gamepad",
+    suppress_gamepad: ?bool = null,
+};
+
+pub const LayerConfig = struct {
+    name: []const u8,
+    trigger: []const u8,
+    activation: []const u8 = "hold",
+    tap: ?[]const u8 = null,
+    hold_timeout: ?i64 = null,
+    remap: ?toml.HashMap([]const u8) = null,
+    gyro: ?GyroConfig = null,
+    stick_left: ?StickConfig = null,
+    stick_right: ?StickConfig = null,
+    dpad: ?DpadConfig = null,
+};
+
 pub const MappingConfig = struct {
     name: ?[]const u8 = null,
     remap: ?toml.HashMap([]const u8) = null,
+    gyro: ?GyroConfig = null,
+    stick: ?StickPairConfig = null,
+    dpad: ?DpadConfig = null,
+    layer: ?[]const LayerConfig = null,
 };
 
 pub const ParseResult = toml.Parsed(MappingConfig);
@@ -22,9 +67,30 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     return parseString(allocator, content);
 }
 
+pub fn validate(cfg: *const MappingConfig) !void {
+    const layers = cfg.layer orelse return;
+
+    var seen = std.BoundedArray([]const u8, 64){};
+
+    for (layers) |*layer| {
+        if (!std.mem.eql(u8, layer.activation, "hold") and
+            !std.mem.eql(u8, layer.activation, "toggle"))
+            return error.InvalidConfig;
+
+        if (layer.hold_timeout) |t| {
+            if (t < 1 or t > 5000) return error.InvalidConfig;
+        }
+
+        for (seen.slice()) |name| {
+            if (std.mem.eql(u8, name, layer.name)) return error.InvalidConfig;
+        }
+        seen.append(layer.name) catch return error.InvalidConfig;
+    }
+}
+
 // --- tests ---
 
-const test_toml =
+const test_toml_basic =
     \\name = "test"
     \\
     \\[remap]
@@ -35,7 +101,7 @@ const test_toml =
 
 test "MappingConfig parses name and remap" {
     const allocator = std.testing.allocator;
-    const result = try parseString(allocator, test_toml);
+    const result = try parseString(allocator, test_toml_basic);
     defer result.deinit();
 
     const cfg = result.value;
@@ -52,4 +118,212 @@ test "MappingConfig: empty config" {
     defer result.deinit();
     try std.testing.expect(result.value.name == null);
     try std.testing.expect(result.value.remap == null);
+    try std.testing.expect(result.value.layer == null);
+}
+
+const test_toml_full =
+    \\name = "default"
+    \\
+    \\[remap]
+    \\M1 = "KEY_F13"
+    \\C = "BTN_TRIGGER_HAPPY1"
+    \\
+    \\[gyro]
+    \\mode = "mouse"
+    \\activate = "hold_RB"
+    \\sensitivity = 15.0
+    \\deadzone = 50
+    \\smoothing = 0.3
+    \\curve = 1.0
+    \\invert_x = false
+    \\invert_y = false
+    \\
+    \\[stick.left]
+    \\mode = "gamepad"
+    \\deadzone = 128
+    \\sensitivity = 1.0
+    \\suppress_gamepad = false
+    \\
+    \\[stick.right]
+    \\mode = "gamepad"
+    \\deadzone = 128
+    \\sensitivity = 1.0
+    \\suppress_gamepad = false
+    \\
+    \\[dpad]
+    \\mode = "gamepad"
+    \\suppress_gamepad = false
+    \\
+    \\[[layer]]
+    \\name = "aim"
+    \\trigger = "LM"
+    \\activation = "hold"
+    \\tap = "mouse_side"
+    \\hold_timeout = 200
+    \\
+    \\[layer.remap]
+    \\RB = "mouse_left"
+    \\
+    \\[layer.gyro]
+    \\mode = "mouse"
+    \\sensitivity = 2.0
+    \\
+    \\[layer.stick_left]
+    \\mode = "scroll"
+    \\
+    \\[layer.stick_right]
+    \\mode = "mouse"
+    \\sensitivity = 1.0
+    \\suppress_gamepad = true
+    \\
+    \\[layer.dpad]
+    \\mode = "arrows"
+    \\suppress_gamepad = true
+    \\
+    \\[[layer]]
+    \\name = "fn"
+    \\trigger = "Select"
+    \\activation = "toggle"
+    \\
+    \\[layer.remap]
+    \\A = "KEY_F1"
+    \\B = "KEY_F2"
+;
+
+test "MappingConfig: full config with layers, gyro, stick, dpad" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, test_toml_full);
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqualStrings("default", cfg.name.?);
+
+    // gyro
+    try std.testing.expect(cfg.gyro != null);
+    try std.testing.expectEqualStrings("mouse", cfg.gyro.?.mode);
+    try std.testing.expectEqualStrings("hold_RB", cfg.gyro.?.activate.?);
+    try std.testing.expectEqual(@as(?f64, 15.0), cfg.gyro.?.sensitivity);
+    try std.testing.expectEqual(@as(?i64, 50), cfg.gyro.?.deadzone);
+
+    // stick
+    try std.testing.expect(cfg.stick != null);
+    try std.testing.expect(cfg.stick.?.left != null);
+    try std.testing.expectEqualStrings("gamepad", cfg.stick.?.left.?.mode);
+    try std.testing.expectEqual(@as(?i64, 128), cfg.stick.?.left.?.deadzone);
+
+    // dpad
+    try std.testing.expect(cfg.dpad != null);
+    try std.testing.expectEqualStrings("gamepad", cfg.dpad.?.mode);
+
+    // layers ordered
+    try std.testing.expect(cfg.layer != null);
+    try std.testing.expectEqual(@as(usize, 2), cfg.layer.?.len);
+    try std.testing.expectEqualStrings("aim", cfg.layer.?[0].name);
+    try std.testing.expectEqualStrings("fn", cfg.layer.?[1].name);
+
+    // layer[0] fields
+    const aim = cfg.layer.?[0];
+    try std.testing.expectEqualStrings("hold", aim.activation);
+    try std.testing.expectEqualStrings("mouse_side", aim.tap.?);
+    try std.testing.expectEqual(@as(?i64, 200), aim.hold_timeout);
+    try std.testing.expect(aim.remap != null);
+    try std.testing.expectEqualStrings("mouse_left", aim.remap.?.map.get("RB").?);
+
+    // layer[0] gyro override
+    try std.testing.expect(aim.gyro != null);
+    try std.testing.expectEqualStrings("mouse", aim.gyro.?.mode);
+    try std.testing.expectEqual(@as(?f64, 2.0), aim.gyro.?.sensitivity);
+
+    // layer[0] stick overrides
+    try std.testing.expect(aim.stick_left != null);
+    try std.testing.expectEqualStrings("scroll", aim.stick_left.?.mode);
+    try std.testing.expect(aim.stick_right != null);
+    try std.testing.expectEqualStrings("mouse", aim.stick_right.?.mode);
+    try std.testing.expectEqual(@as(?bool, true), aim.stick_right.?.suppress_gamepad);
+
+    // layer[0] dpad override
+    try std.testing.expect(aim.dpad != null);
+    try std.testing.expectEqualStrings("arrows", aim.dpad.?.mode);
+
+    // layer[1] fields
+    const fn_layer = cfg.layer.?[1];
+    try std.testing.expectEqualStrings("toggle", fn_layer.activation);
+    try std.testing.expect(fn_layer.remap != null);
+    try std.testing.expectEqualStrings("KEY_F1", fn_layer.remap.?.map.get("A").?);
+
+    try validate(&cfg);
+}
+
+test "validate: missing [mapping] section returns default empty MappingConfig" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, "");
+    defer result.deinit();
+    try validate(&result.value);
+}
+
+test "validate: [[layer]] preserved in declaration order" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "first"
+        \\trigger = "A"
+        \\
+        \\[[layer]]
+        \\name = "second"
+        \\trigger = "B"
+        \\
+        \\[[layer]]
+        \\name = "third"
+        \\trigger = "X"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    const layers = result.value.layer.?;
+    try std.testing.expectEqual(@as(usize, 3), layers.len);
+    try std.testing.expectEqualStrings("first", layers[0].name);
+    try std.testing.expectEqualStrings("second", layers[1].name);
+    try std.testing.expectEqualStrings("third", layers[2].name);
+    try validate(&result.value);
+}
+
+test "validate: invalid activation value returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "bad"
+        \\trigger = "A"
+        \\activation = "press"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: duplicate layer name returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "A"
+        \\
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "B"
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
+}
+
+test "validate: hold_timeout out of range returns error" {
+    const allocator = std.testing.allocator;
+    const toml_str =
+        \\[[layer]]
+        \\name = "bad"
+        \\trigger = "A"
+        \\hold_timeout = 9999
+    ;
+    const result = try parseString(allocator, toml_str);
+    defer result.deinit();
+    try std.testing.expectError(error.InvalidConfig, validate(&result.value));
 }
