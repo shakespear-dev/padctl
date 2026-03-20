@@ -407,3 +407,16 @@ test "unknown button name returns error" {
     ;
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
+
+test "load devices/dualsense.toml succeeds" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/dualsense.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqualStrings("Sony DualSense", cfg.device.name);
+    try std.testing.expectEqual(@as(i64, 0x054c), cfg.device.vid);
+    try std.testing.expectEqual(@as(i64, 0x0ce6), cfg.device.pid);
+    try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
+    try std.testing.expectEqualStrings("usb", cfg.report[0].name);
+}

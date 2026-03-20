@@ -674,6 +674,61 @@ test "transform chain scale+negate" {
     try testing.expectEqual(@as(?i16, -32767), delta.ax);
 }
 
+fn makeDualSenseSample() [64]u8 {
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01; // Report ID
+    raw[1] = 0x00; // left_x = 0 → scale → -32768
+    raw[2] = 0xFF; // left_y = 255 → scale → 32767 → negate → -32767
+    raw[3] = 0xFF; // right_x = 255 → scale → 32767
+    raw[4] = 0x00; // right_y = 0 → scale → -32768 → negate → 32768 (clamped to i16 max by @truncate)
+    raw[5] = 0xC0; // lt = 192
+    raw[6] = 0x80; // rt = 128
+    // byte 8: bit4=Square(X), bit5=Cross(A)
+    raw[8] = 0x30;
+    // gyro at offset 16-21
+    std.mem.writeInt(i16, raw[16..18], 512, .little);  // gyro_x
+    std.mem.writeInt(i16, raw[18..20], -512, .little); // gyro_y
+    std.mem.writeInt(i16, raw[20..22], 256, .little);  // gyro_z
+    // accel at offset 22-27
+    std.mem.writeInt(i16, raw[22..24], 8192, .little); // accel_x (~1g)
+    std.mem.writeInt(i16, raw[24..26], 0, .little);    // accel_y
+    std.mem.writeInt(i16, raw[26..28], -8192, .little); // accel_z
+    return raw;
+}
+
+test "DualSense USB report: axes, triggers, IMU, buttons" {
+    const allocator = testing.allocator;
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    const raw = makeDualSenseSample();
+    const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
+
+    // left_x=0x00 → scale(-32768,32767) on u8: 0*65535/255 - 32768 = -32768
+    try testing.expectEqual(@as(?i16, -32768), delta.ax);
+    // left_y=0xFF → scale → 32767, negate → -32767
+    try testing.expectEqual(@as(?i16, -32767), delta.ay);
+    // right_x=0xFF → scale → 32767
+    try testing.expectEqual(@as(?i16, 32767), delta.rx);
+    // triggers
+    try testing.expectEqual(@as(?u8, 0xC0), delta.lt);
+    try testing.expectEqual(@as(?u8, 0x80), delta.rt);
+    // IMU
+    try testing.expectEqual(@as(?i16, 512), delta.gyro_x);
+    try testing.expectEqual(@as(?i16, -512), delta.gyro_y);
+    try testing.expectEqual(@as(?i16, 256), delta.gyro_z);
+    try testing.expectEqual(@as(?i16, 8192), delta.accel_x);
+    try testing.expectEqual(@as(?i16, 0), delta.accel_y);
+    try testing.expectEqual(@as(?i16, -8192), delta.accel_z);
+    // buttons: byte8 = 0x30 → bit4=Square(X), bit5=Cross(A)
+    const btns = delta.buttons orelse return error.NoBtns;
+    const x_bit: u5 = @intCast(@intFromEnum(ButtonId.X));
+    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
+    try testing.expect(btns & (@as(u32, 1) << x_bit) != 0); // Square pressed
+    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0); // Cross pressed
+    try testing.expect(btns & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.B)))) == 0); // Circle not pressed
+}
+
 test "button_group batch extraction" {
     const allocator = testing.allocator;
     const toml_str =
