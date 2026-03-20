@@ -7,6 +7,7 @@ pub const core = struct {
     pub const layer = @import("core/layer.zig");
     pub const mapper = @import("core/mapper.zig");
     pub const stick = @import("core/stick.zig");
+    pub const dpad = @import("core/dpad.zig");
 };
 
 pub const io = struct {

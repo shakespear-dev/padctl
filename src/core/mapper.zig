@@ -90,7 +90,8 @@ pub const Mapper = struct {
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
         var aux = AuxEventList{};
 
-        // [3] mode processing (gyro mouse; stick/dpad Phase 2b)
+        // [3] mode processing
+        var suppress_dpad_hat: bool = false;
         {
             const gcfg = resolveGyroConfig(self.config);
             const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
@@ -98,6 +99,17 @@ pub const Mapper = struct {
                 if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
                 if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
             }
+            const dpad_cfg = self.config.dpad orelse mapping.DpadConfig{};
+            @import("dpad.zig").processDpad(
+                self.state.dpad_x,
+                self.state.dpad_y,
+                self.prev.dpad_x,
+                self.prev.dpad_y,
+                &dpad_cfg,
+                &aux,
+                &self.suppressed_buttons,
+                &suppress_dpad_hat,
+            );
         }
 
         // [4] base remap: collect suppress mask + per-source inject targets
@@ -138,6 +150,10 @@ pub const Mapper = struct {
         // assemble emit state
         var emit_state = self.state;
         emit_state.buttons = (self.state.buttons & ~self.suppressed_buttons) | self.injected_buttons;
+        if (suppress_dpad_hat) {
+            emit_state.dpad_x = 0;
+            emit_state.dpad_y = 0;
+        }
 
         // [7] prev-frame masking: same masks applied to prev before diff
         var masked_prev = self.prev;
