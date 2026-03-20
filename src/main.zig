@@ -4,6 +4,7 @@ pub const core = struct {
     pub const state = @import("core/state.zig");
     pub const interpreter = @import("core/interpreter.zig");
     pub const remap = @import("core/remap.zig");
+    pub const layer = @import("core/layer.zig");
 };
 
 pub const io = struct {
