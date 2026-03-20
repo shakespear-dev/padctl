@@ -12,6 +12,36 @@ pub const MAX_FDS = 10;
 
 const signalfd_siginfo_size = 128;
 
+pub const TimerCallback = struct {
+    ptr: *anyopaque,
+    on_expired: *const fn (*anyopaque) void,
+
+    pub fn call(self: TimerCallback) void {
+        self.on_expired(self.ptr);
+    }
+};
+
+/// Arm a timerfd for a one-shot timeout (it_interval = 0).
+pub fn armTimer(fd: posix.fd_t, timeout_ms: u32) !void {
+    const spec = linux.itimerspec{
+        .it_value = .{
+            .sec = @intCast(timeout_ms / 1000),
+            .nsec = @intCast((timeout_ms % 1000) * 1_000_000),
+        },
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+    };
+    _ = linux.timerfd_settime(fd, .{}, &spec, null);
+}
+
+/// Disarm a timerfd by setting all fields to zero.
+pub fn disarmTimer(fd: posix.fd_t) void {
+    const spec = linux.itimerspec{
+        .it_value = .{ .sec = 0, .nsec = 0 },
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+    };
+    _ = linux.timerfd_settime(fd, .{}, &spec, null);
+}
+
 pub const EventLoop = struct {
     pollfds: [MAX_FDS]posix.pollfd,
     fd_count: usize,
@@ -20,6 +50,7 @@ pub const EventLoop = struct {
     stop_w: posix.fd_t,
     // device fds start at slot 2 (after signalfd + stop_pipe)
     device_base: usize,
+    timer_fd: posix.fd_t,
     running: bool,
     gamepad_state: state.GamepadState,
 
@@ -35,6 +66,13 @@ pub const EventLoop = struct {
         const pfds = try posix.pipe2(.{ .NONBLOCK = true });
         const stop_r = pfds[0];
         const stop_w = pfds[1];
+        errdefer {
+            posix.close(stop_r);
+            posix.close(stop_w);
+        }
+
+        const timer_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+        errdefer posix.close(timer_fd);
 
         var loop = EventLoop{
             .pollfds = undefined,
@@ -43,15 +81,17 @@ pub const EventLoop = struct {
             .stop_r = stop_r,
             .stop_w = stop_w,
             .device_base = 0,
+            .timer_fd = timer_fd,
             .running = false,
             .gamepad_state = .{},
         };
 
-        // slot 0 = signalfd, slot 1 = stop pipe
+        // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = timerfd
         loop.pollfds[0] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[1] = .{ .fd = stop_r, .events = posix.POLL.IN, .revents = 0 };
-        loop.fd_count = 2;
-        loop.device_base = 2;
+        loop.pollfds[2] = .{ .fd = timer_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.fd_count = 3;
+        loop.device_base = 3;
 
         return loop;
     }
@@ -68,6 +108,7 @@ pub const EventLoop = struct {
         devices: []DeviceIO,
         interpreter: *const Interpreter,
         output: OutputDevice,
+        on_timer: ?TimerCallback,
     ) !void {
         self.running = true;
         var buf: [64]u8 = undefined;
@@ -87,6 +128,13 @@ pub const EventLoop = struct {
 
             // Check stop pipe (slot 1)
             if (self.pollfds[1].revents & posix.POLL.IN != 0) break;
+
+            // Check timerfd (slot 2)
+            if (self.pollfds[2].revents & posix.POLL.IN != 0) {
+                var expiry: [8]u8 = undefined;
+                _ = posix.read(self.timer_fd, &expiry) catch {};
+                if (on_timer) |cb| cb.call();
+            }
 
             // Check device fds
             for (devices, 0..) |dev, i| {
@@ -126,6 +174,7 @@ pub const EventLoop = struct {
         posix.close(self.signal_fd);
         posix.close(self.stop_r);
         posix.close(self.stop_w);
+        posix.close(self.timer_fd);
     }
 };
 
@@ -153,18 +202,18 @@ const testing = std.testing;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const uinput = @import("io/uinput.zig");
 
-test "EventLoop.init creates signalfd" {
+test "EventLoop.init creates signalfd and timerfd" {
     var loop = try EventLoop.init();
     defer loop.deinit();
     try testing.expect(loop.signal_fd >= 0);
-    // slot 0 = signalfd, slot 1 = stop_pipe
-    try testing.expectEqual(@as(usize, 2), loop.fd_count);
+    try testing.expect(loop.timer_fd >= 0);
+    // slot 0 = signalfd, slot 1 = stop_pipe, slot 2 = timerfd
+    try testing.expectEqual(@as(usize, 3), loop.fd_count);
 }
 
 test "EventLoop.stop wakes ppoll" {
     var loop = try EventLoop.init();
     defer loop.deinit();
-    // stop() writes to stop_w; verify stop_r becomes readable
     loop.stop();
     var pfd = [1]posix.pollfd{.{ .fd = loop.stop_r, .events = posix.POLL.IN, .revents = 0 }};
     const ready = try posix.poll(&pfd, 0);
@@ -181,9 +230,9 @@ test "EventLoop.addDevice registers fd" {
     const dev = mock.deviceIO();
 
     try loop.addDevice(dev);
-    // fd_count goes from 2 → 3, device is at slot 2
-    try testing.expectEqual(@as(usize, 3), loop.fd_count);
-    try testing.expectEqual(mock.pipe_r, loop.pollfds[2].fd);
+    // fd_count goes from 3 → 4, device is at slot 3
+    try testing.expectEqual(@as(usize, 4), loop.fd_count);
+    try testing.expectEqual(mock.pipe_r, loop.pollfds[3].fd);
 }
 
 test "EventLoop.addDevice rejects overflow" {
@@ -191,22 +240,114 @@ test "EventLoop.addDevice rejects overflow" {
     var loop = try EventLoop.init();
     defer loop.deinit();
 
-    // Fill remaining slots (already have 2: signalfd + stop_pipe)
-    var mocks: [MAX_FDS - 2]MockDeviceIO = undefined;
-    for (0..MAX_FDS - 2) |i| {
+    // Fill remaining slots (already have 3: signalfd + stop_pipe + timerfd)
+    var mocks: [MAX_FDS - 3]MockDeviceIO = undefined;
+    for (0..MAX_FDS - 3) |i| {
         mocks[i] = try MockDeviceIO.init(allocator, &.{});
     }
-    defer for (0..MAX_FDS - 2) |i| mocks[i].deinit();
+    defer for (0..MAX_FDS - 3) |i| mocks[i].deinit();
 
-    for (0..MAX_FDS - 2) |i| {
+    for (0..MAX_FDS - 3) |i| {
         const dev = mocks[i].deviceIO();
         try loop.addDevice(dev);
     }
-    // Now fd_count == MAX_FDS, next add should fail
     var extra = try MockDeviceIO.init(allocator, &.{});
     defer extra.deinit();
     const extra_dev = extra.deviceIO();
     try testing.expectError(error.TooManyFds, loop.addDevice(extra_dev));
+}
+
+test "armTimer / disarmTimer: arm then disarm does not leave fd readable" {
+    var loop = try EventLoop.init();
+    defer loop.deinit();
+
+    try armTimer(loop.timer_fd, 5000); // 5 seconds — will not fire during test
+    disarmTimer(loop.timer_fd);
+
+    // After disarm, timerfd should not be readable
+    var pfd = [1]posix.pollfd{.{ .fd = loop.timer_fd, .events = posix.POLL.IN, .revents = 0 }};
+    const ready = try posix.poll(&pfd, 0);
+    try testing.expectEqual(@as(usize, 0), ready);
+}
+
+test "armTimer: fires after timeout" {
+    var loop = try EventLoop.init();
+    defer loop.deinit();
+
+    try armTimer(loop.timer_fd, 20); // 20ms
+
+    var pfd = [1]posix.pollfd{.{ .fd = loop.timer_fd, .events = posix.POLL.IN, .revents = 0 }};
+    // Wait up to 200ms for the timer to fire
+    const ready = try posix.poll(&pfd, 200);
+    try testing.expectEqual(@as(usize, 1), ready);
+
+    // Consume 8 bytes — must not block
+    var expiry: [8]u8 = undefined;
+    const n = try posix.read(loop.timer_fd, &expiry);
+    try testing.expectEqual(@as(usize, 8), n);
+}
+
+test "EventLoop timerfd: callback invoked on timer expiry" {
+    const allocator = testing.allocator;
+    var loop = try EventLoop.init();
+    defer loop.deinit();
+
+    var mock = try MockDeviceIO.init(allocator, &.{});
+    defer mock.deinit();
+    const dev = mock.deviceIO();
+    try loop.addDevice(dev);
+
+    var fired: bool = false;
+
+    const Ctx = struct {
+        fn onTimer(ptr: *anyopaque) void {
+            const p: *bool = @ptrCast(@alignCast(ptr));
+            p.* = true;
+        }
+    };
+    const cb = TimerCallback{ .ptr = &fired, .on_expired = Ctx.onTimer };
+
+    // Arm for 20ms, then run the loop
+    try armTimer(loop.timer_fd, 20);
+
+    const parsed = try device_mod.parseString(allocator, minimal_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    const MockOut = struct {
+        fn outputDevice() uinput.OutputDevice {
+            return .{ .ptr = undefined, .vtable = &vtable };
+        }
+        const vtable = uinput.OutputDevice.VTable{
+            .emit = mockEmit,
+            .poll_ff = mockPollFf,
+            .close = mockClose,
+        };
+        fn mockEmit(_: *anyopaque, _: state.GamepadState) anyerror!void {}
+        fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent { return null; }
+        fn mockClose(_: *anyopaque) void {}
+    };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        cb: TimerCallback,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{ .loop = &loop, .devs = &devs, .interp = &interp, .cb = cb };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.devs, c.interp, MockOut.outputDevice(), c.cb);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+    std.Thread.sleep(150 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    try testing.expect(fired);
 }
 
 // MockOutput for event loop integration test
@@ -290,10 +431,8 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
     defer out.deinit();
     const output = out.outputDevice();
 
-    // Signal pipe to make device fd ready, then stop after one iteration
     try mock.signal();
 
-    // Run the loop in a thread, stop after first dispatch
     const RunCtx = struct {
         loop: *EventLoop,
         devices: []DeviceIO,
@@ -310,40 +449,16 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(c.devices, c.interp, c.output);
+            try c.loop.run(c.devices, c.interp, c.output, null);
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
 
-    // Give the loop a moment to process, then stop it
     std.Thread.sleep(10 * std.time.ns_per_ms);
     loop.stop();
     thread.join();
 
-    // left_x = 500 should be in gamepad state
     try testing.expectEqual(@as(i16, 500), loop.gamepad_state.ax);
     try testing.expectEqual(@as(usize, 1), out.emitted.items.len);
     try testing.expectEqual(@as(i16, 500), out.emitted.items[0].ax);
-}
-
-test "EventLoop timerfd slot: nfds grows without crash" {
-    const allocator = testing.allocator;
-    var loop = try EventLoop.init();
-    defer loop.deinit();
-
-    // Add one device
-    var mock = try MockDeviceIO.init(allocator, &.{});
-    defer mock.deinit();
-    const dev = mock.deviceIO();
-    try loop.addDevice(dev);
-
-    const before = loop.fd_count; // should be 3 (signalfd + stop_pipe + device)
-
-    // Simulate timerfd activation: add a dummy pollfd (Phase 2 pattern)
-    const timer_placeholder = posix.pollfd{ .fd = mock.pipe_r, .events = posix.POLL.IN, .revents = 0 };
-    loop.pollfds[loop.fd_count] = timer_placeholder;
-    loop.fd_count += 1;
-
-    try testing.expectEqual(before + 1, loop.fd_count);
-    // Just verifying the slot math — ppoll not actually called here
 }
