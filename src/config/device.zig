@@ -310,6 +310,19 @@ test "load test-vader5.toml succeeds" {
     try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
 }
 
+test "load flydigi-vader5.toml succeeds" {
+    const allocator = std.testing.allocator;
+    const result = try parseFile(allocator, "devices/flydigi-vader5.toml");
+    defer result.deinit();
+
+    const cfg = result.value;
+    try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", cfg.device.name);
+    try std.testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
+    try std.testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
+    try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
+    try std.testing.expectEqualStrings("extended", cfg.report[0].name);
+}
+
 test "valid config parses and validates" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator, test_toml);
