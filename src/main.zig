@@ -10,6 +10,11 @@ pub const io = struct {
     pub const hidraw = @import("io/hidraw.zig");
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
+    pub const ioctl_constants = @import("io/ioctl_constants.zig");
+};
+
+pub const testing_support = struct {
+    pub const mock_device_io = @import("test/mock_device_io.zig");
 };
 
 pub const config = struct {
