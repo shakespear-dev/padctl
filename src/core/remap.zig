@@ -62,17 +62,19 @@ pub const Remap = struct {
             const idx: u5 = @intCast(@intFromEnum(rule.source));
             const mask: u32 = @as(u32, 1) << idx;
             const pressed = (gs.buttons & mask) != 0;
-            if (!pressed) continue;
 
-            // Suppress source
+            // Suppress source regardless of state
             gs.buttons &= ~mask;
 
             switch (rule.target) {
-                .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = true } }) catch {},
-                .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = true } }) catch {},
+                .key => |code| aux.append(.{ .key = .{ .code = code, .pressed = pressed } }) catch {},
+                .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {},
                 .gamepad_button => |dst| {
-                    const dst_idx: u5 = @intCast(@intFromEnum(dst));
-                    gs.buttons |= @as(u32, 1) << dst_idx;
+                    if (pressed) {
+                        const dst_idx: u5 = @intCast(@intFromEnum(dst));
+                        gs.buttons |= @as(u32, 1) << dst_idx;
+                    }
+                    // released: target bit stays cleared (suppressed above, not re-set)
                 },
                 .disabled => {},
             }
