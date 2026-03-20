@@ -5,6 +5,13 @@ const remap = @import("remap.zig");
 pub const LayerConfig = mapping.LayerConfig;
 pub const RemapTarget = remap.RemapTargetResolved;
 
+pub const LayerAction = struct {
+    arm_timer_ms: ?u64 = null,
+    disarm_timer: bool = false,
+    tap_event: ?RemapTarget = null,
+    active_changed: bool = false,
+};
+
 pub const TapHoldPhase = enum { pending, active };
 
 pub const TapHoldState = struct {
@@ -52,6 +59,70 @@ pub const LayerState = struct {
             if (self.toggled.contains(cfg.name)) return cfg;
         }
         return null;
+    }
+
+    /// Per-frame dispatch: converts button edges into layer activation/deactivation.
+    /// Implements ADR-004 mutual exclusion: while any layer is ACTIVE or PENDING,
+    /// new Hold presses are silently ignored; new Toggle-on is blocked until getActive() == null.
+    pub fn processLayerTriggers(
+        self: *LayerState,
+        configs: []const LayerConfig,
+        buttons: u32,
+        prev_buttons: u32,
+    ) LayerAction {
+        var action = LayerAction{};
+
+        for (configs) |*cfg| {
+            const trigger_id = std.meta.stringToEnum(@import("state.zig").ButtonId, cfg.trigger) orelse continue;
+            const mask = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(trigger_id)));
+            const pressed = (buttons & mask) != 0;
+            const was_pressed = (prev_buttons & mask) != 0;
+
+            if (std.mem.eql(u8, cfg.activation, "hold")) {
+                if (pressed and !was_pressed) {
+                    // Mutual exclusion: if another layer is already PENDING or ACTIVE, ignore.
+                    if (self.tap_hold) |th| {
+                        if (!std.mem.eql(u8, th.layer_name, cfg.name)) continue;
+                    }
+                    const timeout: u64 = @intCast(cfg.hold_timeout orelse 200);
+                    const res = self.onTriggerPress(cfg.name, timeout);
+                    if (res.arm_timer_ms) |ms| {
+                        action.arm_timer_ms = ms;
+                        action.active_changed = true;
+                    }
+                } else if (!pressed and was_pressed) {
+                    // Only process release for the layer that owns tap_hold.
+                    const th = self.tap_hold orelse continue;
+                    if (!std.mem.eql(u8, th.layer_name, cfg.name)) continue;
+                    const tap_target: ?RemapTarget = if (cfg.tap) |t|
+                        remap.resolveTarget(t) catch null
+                    else
+                        null;
+                    const res = self.onTriggerRelease(tap_target);
+                    if (res.disarm_timer) action.disarm_timer = true;
+                    if (res.tap_event) |ev| action.tap_event = ev;
+                    if (res.layer_activated or res.layer_deactivated) action.active_changed = true;
+                    if (res.layer_deactivated) action.active_changed = true;
+                }
+            } else { // toggle
+                if (!pressed and was_pressed) {
+                    if (self.toggled.contains(cfg.name)) {
+                        self.toggled.remove(cfg.name);
+                        action.active_changed = true;
+                    } else if (self.getActive(configs) == null) {
+                        // Clear any stale PENDING tap_hold state.
+                        if (self.tap_hold != null) {
+                            self.tap_hold = null;
+                            action.disarm_timer = true;
+                        }
+                        self.toggled.put(cfg.name, {}) catch {};
+                        action.active_changed = true;
+                    }
+                }
+            }
+        }
+
+        return action;
     }
 
     /// IDLE → PENDING: arm timerfd
@@ -286,4 +357,187 @@ test "tap-hold: ACTIVE re-press same trigger → ignored" {
     const res = ls.onTriggerPress("aim", 200);
     try testing.expect(res.arm_timer_ms == null);
     try testing.expectEqual(TapHoldPhase.active, ls.tap_hold.?.phase);
+}
+
+// --- T5: processLayerTriggers tests ---
+
+const hold_aim = LayerConfig{ .name = "aim", .trigger = "LT", .activation = "hold" };
+const hold_fn = LayerConfig{ .name = "fn", .trigger = "RB", .activation = "hold" };
+const toggle_sel = LayerConfig{ .name = "sel", .trigger = "Select", .activation = "toggle" };
+
+fn ltMask() u32 {
+    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.LT)));
+}
+fn rbMask() u32 {
+    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.RB)));
+}
+fn selMask() u32 {
+    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.Select)));
+}
+
+test "processLayerTriggers: Hold press → PENDING, arm timer" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{hold_aim};
+    const lt = ltMask();
+
+    const action = ls.processLayerTriggers(&configs, lt, 0);
+    try testing.expect(action.arm_timer_ms != null);
+    try testing.expectEqual(@as(?u64, 200), action.arm_timer_ms);
+    try testing.expect(action.active_changed);
+    try testing.expect(ls.tap_hold != null);
+    try testing.expectEqual(TapHoldPhase.pending, ls.tap_hold.?.phase);
+}
+
+test "processLayerTriggers: Hold PENDING + timer → ACTIVE, getActive returns layer" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{hold_aim};
+    const lt = ltMask();
+
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.onTimerExpired();
+
+    try testing.expect(ls.getActive(&configs) != null);
+    try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
+}
+
+test "processLayerTriggers: Hold ACTIVE + release → IDLE" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{hold_aim};
+    const lt = ltMask();
+
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.onTimerExpired();
+
+    const action = ls.processLayerTriggers(&configs, 0, lt);
+    try testing.expect(action.active_changed);
+    try testing.expect(ls.tap_hold == null);
+    try testing.expect(ls.getActive(&configs) == null);
+}
+
+test "processLayerTriggers: Hold PENDING release → tap event + disarm" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const tap_cfg = LayerConfig{ .name = "aim", .trigger = "LT", .activation = "hold", .tap = "KEY_F13" };
+    const configs = [_]LayerConfig{tap_cfg};
+    const lt = ltMask();
+
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    const action = ls.processLayerTriggers(&configs, 0, lt);
+
+    try testing.expect(action.disarm_timer);
+    try testing.expect(action.tap_event != null);
+    try testing.expect(ls.tap_hold == null);
+}
+
+test "processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while PENDING" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{ hold_aim, hold_fn };
+    const lt = ltMask();
+    const rb = rbMask();
+
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
+
+    // RB pressed while LT PENDING — must be ignored
+    const action = ls.processLayerTriggers(&configs, lt | rb, lt);
+    try testing.expect(action.arm_timer_ms == null);
+    try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
+}
+
+test "processLayerTriggers: ADR-004 mutual exclusion — second Hold press ignored while ACTIVE" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{ hold_aim, hold_fn };
+    const lt = ltMask();
+    const rb = rbMask();
+
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.onTimerExpired();
+
+    const action = ls.processLayerTriggers(&configs, lt | rb, lt);
+    try testing.expect(action.arm_timer_ms == null);
+    try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
+}
+
+test "processLayerTriggers: Toggle release → layer on" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{toggle_sel};
+    const sel = selMask();
+
+    const action = ls.processLayerTriggers(&configs, 0, sel);
+    try testing.expect(action.active_changed);
+    try testing.expect(ls.toggled.contains("sel"));
+    try testing.expect(ls.getActive(&configs) != null);
+}
+
+test "processLayerTriggers: Toggle second release → layer off" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{toggle_sel};
+    const sel = selMask();
+
+    _ = ls.processLayerTriggers(&configs, 0, sel);
+    const action = ls.processLayerTriggers(&configs, 0, sel);
+    try testing.expect(action.active_changed);
+    try testing.expect(!ls.toggled.contains("sel"));
+    try testing.expect(ls.getActive(&configs) == null);
+}
+
+test "processLayerTriggers: Toggle on blocked while Hold ACTIVE" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{ hold_aim, toggle_sel };
+    const lt = ltMask();
+    const sel = selMask();
+
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.onTimerExpired();
+
+    // Toggle release while Hold ACTIVE — must be blocked
+    _ = ls.processLayerTriggers(&configs, lt, lt | sel);
+    try testing.expect(!ls.toggled.contains("sel"));
+    try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
+}
+
+test "processLayerTriggers: Toggle + Hold coexist, Hold takes priority in getActive" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const configs = [_]LayerConfig{ hold_aim, toggle_sel };
+    const lt = ltMask();
+    const sel = selMask();
+
+    // Toggle on first (no active layer yet)
+    _ = ls.processLayerTriggers(&configs, 0, sel);
+    try testing.expect(ls.toggled.contains("sel"));
+
+    // Hold press + activate
+    _ = ls.processLayerTriggers(&configs, lt, 0);
+    _ = ls.onTimerExpired();
+
+    // Hold must take priority
+    try testing.expectEqualStrings("aim", ls.getActive(&configs).?.name);
+}
+
+test "processLayerTriggers: multiple Toggles on — declaration order wins (ADR-004)" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+    const tog_a = LayerConfig{ .name = "a", .trigger = "LB", .activation = "toggle" };
+    const tog_b = LayerConfig{ .name = "b", .trigger = "RB", .activation = "toggle" };
+    const configs = [_]LayerConfig{ tog_a, tog_b };
+    const lb = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.LB)));
+    const rb = rbMask();
+
+    // Toggle "a" on
+    _ = ls.processLayerTriggers(&configs, 0, lb);
+    try testing.expect(ls.toggled.contains("a"));
+
+    // "a" is active now; "b" toggle-on should be blocked
+    _ = ls.processLayerTriggers(&configs, 0, rb);
+    try testing.expect(!ls.toggled.contains("b"));
+    try testing.expectEqualStrings("a", ls.getActive(&configs).?.name);
 }

@@ -82,7 +82,7 @@ pub const Remap = struct {
     }
 };
 
-fn resolveTarget(raw: []const u8) !RemapTargetResolved {
+pub fn resolveTarget(raw: []const u8) !RemapTargetResolved {
     if (std.mem.eql(u8, raw, "disabled")) return .disabled;
 
     // mouse_* shorthand
