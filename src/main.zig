@@ -7,6 +7,7 @@ pub const tools = struct {
 
 pub const cli = struct {
     pub const install = @import("cli/install.zig");
+    pub const scan = @import("cli/scan.zig");
 };
 
 pub const wasm = struct {
@@ -79,6 +80,8 @@ const Cli = struct {
     doc_gen: bool = false,
     doc_gen_output: []const u8 = "docs/src/devices",
     install_opts: ?cli.install.InstallOptions = null,
+    scan: bool = false,
+    scan_config_dir: []const u8 = "/usr/share/padctl/devices",
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -117,6 +120,16 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 }
             }
             parsed_cli.install_opts = opts;
+        } else if (std.mem.eql(u8, arg, "scan")) {
+            parsed_cli.scan = true;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--config-dir")) {
+                    parsed_cli.scan_config_dir = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown scan argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
         } else if (std.mem.eql(u8, arg, "--config")) {
             parsed_cli.config_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--config-dir")) {
@@ -143,6 +156,14 @@ fn printHelp() void {
     const help =
         \\Usage: padctl [options]
         \\       padctl install [--prefix /usr] [--destdir ""]
+        \\       padctl scan [--config-dir <dir>]
+        \\
+        \\Subcommands:
+        \\  install             Install binary, service, udev rules, and device configs
+        \\    --prefix <dir>    Installation prefix (default: /usr)
+        \\    --destdir <dir>   Staging root for package builds (default: "")
+        \\  scan                List connected HID devices and config match status
+        \\    --config-dir <d>  Search for device configs here (default: /usr/share/padctl/devices)
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
@@ -153,11 +174,6 @@ fn printHelp() void {
         \\  --output <dir>      Output directory for --doc-gen (default: docs/src/devices)
         \\  --help, -h          Show this help
         \\  --version, -V       Show version
-        \\
-        \\Subcommands:
-        \\  install             Install binary, service, udev rules, and device configs
-        \\    --prefix <dir>    Installation prefix (default: /usr)
-        \\    --destdir <dir>   Staging root for package builds (default: "")
         \\
     ;
     _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
@@ -179,6 +195,15 @@ pub fn main() !void {
     if (parsed.install_opts) |opts| {
         cli.install.run(allocator, opts) catch |err| {
             std.log.err("install failed: {}", .{err});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    }
+
+    // scan subcommand
+    if (parsed.scan) {
+        cli.scan.run(allocator, parsed.scan_config_dir) catch |err| {
+            std.log.err("scan failed: {}", .{err});
             std.process.exit(1);
         };
         std.process.exit(0);
