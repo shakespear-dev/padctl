@@ -57,7 +57,7 @@ Optional. Called per input frame only when `[wasm.overrides] process_report = tr
 
 - `raw_ptr` / `raw_len` -- raw HID report in the input scratch area (`0x0000`).
 - `out_ptr` / `out_len` -- output scratch area (`0x1000`) for override data.
-- Return `>= 0` -- output buffer contains override data (byte count).
+- Return `>= 0` -- signals override; host reads the full output buffer.
 - Return `< 0` -- drop this frame (padctl keeps previous gamepad state).
 - Timeout: 1 ms.
 
@@ -86,6 +86,9 @@ Write a log message to padctl's log output.
 
 - `level` -- `0` = debug, `1` = error.
 - Messages are truncated at 256 bytes by the host.
+- In C, call `padctl_log()` (declared in `padctl_plugin.h`). The WASM import name
+  is `env.log` via `__attribute__((import_name("log")))`, avoiding the `math.h`
+  `log()` collision.
 
 ### `get_config(key_ptr: i32, key_len: i32, out_ptr: i32, out_len: i32) -> i32`
 
@@ -107,6 +110,10 @@ frames within one device session).
 Read a previously stored key-value entry.
 
 - Returns byte count copied into `out`, or `0` if key not found.
+
+### `abort`
+
+Not yet implemented. Documented in engineering spec as a future addition.
 
 ## Memory Model
 
@@ -190,6 +197,6 @@ Minimal echo plugin that copies input report to output unchanged:
     local.get 2           ;; out_ptr
     local.get 0           ;; raw_ptr
     local.get 1           ;; raw_len
-    memory.copy           ;; copy raw -> out
+    memory.copy           ;; copy raw -> out (requires bulk-memory; wasm3 support depends on build config)
     i32.const 0))         ;; return 0 = override with output
 ```
