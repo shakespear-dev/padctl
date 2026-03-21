@@ -5,6 +5,11 @@ pub const tools = struct {
     pub const docgen = @import("tools/docgen.zig");
 };
 
+pub const wasm = struct {
+    pub const runtime = @import("wasm/runtime.zig");
+    pub const host = @import("wasm/host.zig");
+};
+
 pub const core = struct {
     pub const state = @import("core/state.zig");
     pub const interpreter = @import("core/interpreter.zig");

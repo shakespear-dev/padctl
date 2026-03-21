@@ -10,6 +10,8 @@ const mapper_mod = @import("core/mapper.zig");
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const fillTemplate = @import("core/command.zig").fillTemplate;
 const Param = @import("core/command.zig").Param;
+const wasm_runtime = @import("wasm/runtime.zig");
+pub const WasmPlugin = wasm_runtime.WasmPlugin;
 
 // signalfd(0) + stop_pipe(1) + per-interface fds + uinput FF fd + timerfd slot
 pub const MAX_FDS = 10;
@@ -59,6 +61,10 @@ pub const EventLoop = struct {
     running: bool,
     gamepad_state: state.GamepadState,
     last_ts: i128,
+    // optional WASM plugin: set after init when config declares [wasm]
+    wasm_plugin: ?WasmPlugin = null,
+    // whether process_report override is active (wasm.overrides.process_report = true)
+    wasm_override_report: bool = false,
 
     pub fn init() !EventLoop {
         var mask = posix.sigemptyset();
@@ -225,7 +231,20 @@ pub const EventLoop = struct {
                     if (n == 0) break;
 
                     const interface_id: u8 = @intCast(i);
-                    if (interpreter.processReport(interface_id, buf[0..n]) catch null) |delta| {
+                    const maybe_delta: ?@import("core/interpreter.zig").GamepadStateDelta = blk: {
+                        if (self.wasm_plugin) |wp| {
+                            if (self.wasm_override_report) {
+                                var out_buf: [64]u8 = undefined;
+                                switch (wp.processReport(buf[0..n], &out_buf)) {
+                                    .override => |d| break :blk d,
+                                    .drop => break :blk null,
+                                    .passthrough => {},
+                                }
+                            }
+                        }
+                        break :blk interpreter.processReport(interface_id, buf[0..n]) catch null;
+                    };
+                    if (maybe_delta) |delta| {
                         if (mapper) |m| {
                             const events = try m.apply(delta, dt_ms);
                             self.gamepad_state.applyDelta(delta);

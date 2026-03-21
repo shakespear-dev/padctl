@@ -110,11 +110,21 @@ pub const OutputConfig = struct {
     aux: ?AuxConfig = null,
 };
 
+pub const WasmOverridesConfig = struct {
+    process_report: ?bool = null,
+};
+
+pub const WasmConfig = struct {
+    plugin: []const u8,
+    overrides: ?WasmOverridesConfig = null,
+};
+
 pub const DeviceConfig = struct {
     device: DeviceInfo,
     report: []const ReportConfig,
     commands: ?toml.HashMap(CommandConfig) = null,
     output: ?OutputConfig = null,
+    wasm: ?WasmConfig = null,
 };
 
 const valid_transforms = [_][]const u8{ "negate", "abs", "scale", "clamp", "deadzone", "lookup" };
