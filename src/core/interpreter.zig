@@ -9,11 +9,297 @@ pub const ReportConfig = device.ReportConfig;
 
 pub const ProcessError = error{ ChecksumMismatch, MalformedConfig };
 
+// --- compile-time type catalogue ---
+
+const FieldType = enum { u8, i8, u16le, i16le, u16be, i16be, u32le, i32le, u32be, i32be };
+
+fn parseFieldType(s: []const u8) ?FieldType {
+    return std.meta.stringToEnum(FieldType, s);
+}
+
+fn typeMaxByTag(t: FieldType) i64 {
+    return switch (t) {
+        .u8 => 255,
+        .i8 => 127,
+        .u16le, .u16be => 65535,
+        .i16le, .i16be => 32767,
+        .u32le, .u32be => 4294967295,
+        .i32le, .i32be => 2147483647,
+    };
+}
+
+fn readFieldByTag(raw: []const u8, off: usize, t: FieldType) i64 {
+    return switch (t) {
+        .u8 => raw[off],
+        .i8 => @as(i8, @bitCast(raw[off])),
+        .u16le => std.mem.readInt(u16, raw[off..][0..2], .little),
+        .i16le => std.mem.readInt(i16, raw[off..][0..2], .little),
+        .u16be => std.mem.readInt(u16, raw[off..][0..2], .big),
+        .i16be => std.mem.readInt(i16, raw[off..][0..2], .big),
+        .u32le => std.mem.readInt(u32, raw[off..][0..4], .little),
+        .i32le => std.mem.readInt(i32, raw[off..][0..4], .little),
+        .u32be => std.mem.readInt(u32, raw[off..][0..4], .big),
+        .i32be => std.mem.readInt(i32, raw[off..][0..4], .big),
+    };
+}
+
+// --- compile-time field name catalogue ---
+
+const FieldTag = enum {
+    ax, ay, rx, ry, lt, rt,
+    gyro_x, gyro_y, gyro_z,
+    accel_x, accel_y, accel_z,
+    unknown,
+};
+
+fn parseFieldTag(name: []const u8) FieldTag {
+    if (std.mem.eql(u8, name, "left_x") or std.mem.eql(u8, name, "ax")) return .ax;
+    if (std.mem.eql(u8, name, "left_y") or std.mem.eql(u8, name, "ay")) return .ay;
+    if (std.mem.eql(u8, name, "right_x") or std.mem.eql(u8, name, "rx")) return .rx;
+    if (std.mem.eql(u8, name, "right_y") or std.mem.eql(u8, name, "ry")) return .ry;
+    if (std.mem.eql(u8, name, "lt")) return .lt;
+    if (std.mem.eql(u8, name, "rt")) return .rt;
+    if (std.mem.eql(u8, name, "gyro_x")) return .gyro_x;
+    if (std.mem.eql(u8, name, "gyro_y")) return .gyro_y;
+    if (std.mem.eql(u8, name, "gyro_z")) return .gyro_z;
+    if (std.mem.eql(u8, name, "accel_x")) return .accel_x;
+    if (std.mem.eql(u8, name, "accel_y")) return .accel_y;
+    if (std.mem.eql(u8, name, "accel_z")) return .accel_z;
+    return .unknown;
+}
+
+fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
+    switch (tag) {
+        .ax => delta.ax = @truncate(val),
+        .ay => delta.ay = @truncate(val),
+        .rx => delta.rx = @truncate(val),
+        .ry => delta.ry = @truncate(val),
+        .lt => delta.lt = @intCast(val & 0xff),
+        .rt => delta.rt = @intCast(val & 0xff),
+        .gyro_x => delta.gyro_x = @truncate(val),
+        .gyro_y => delta.gyro_y = @truncate(val),
+        .gyro_z => delta.gyro_z = @truncate(val),
+        .accel_x => delta.accel_x = @truncate(val),
+        .accel_y => delta.accel_y = @truncate(val),
+        .accel_z => delta.accel_z = @truncate(val),
+        .unknown => {},
+    }
+}
+
+// --- pre-compiled transform chain ---
+
+const TransformOp = enum { negate, abs, scale, clamp, deadzone };
+
+const CompiledTransform = struct {
+    op: TransformOp,
+    a: i64 = 0,
+    b: i64 = 0,
+};
+
+const MAX_TRANSFORMS = 8;
+
+const CompiledTransformChain = struct {
+    items: [MAX_TRANSFORMS]CompiledTransform = undefined,
+    len: u8 = 0,
+    type_tag: FieldType,
+};
+
+fn compileTransformChain(chain: []const u8, type_tag: FieldType) CompiledTransformChain {
+    var result = CompiledTransformChain{ .type_tag = type_tag };
+    var pos: usize = 0;
+    var depth: usize = 0;
+    var seg_start: usize = 0;
+    while (pos < chain.len) : (pos += 1) {
+        switch (chain[pos]) {
+            '(' => depth += 1,
+            ')' => if (depth > 0) { depth -= 1; },
+            ',' => if (depth == 0) {
+                if (result.len < MAX_TRANSFORMS)
+                    result.items[result.len] = compileTransformSeg(std.mem.trim(u8, chain[seg_start..pos], " \t"));
+                result.len += 1;
+                seg_start = pos + 1;
+            },
+            else => {},
+        }
+    }
+    if (result.len < MAX_TRANSFORMS)
+        result.items[result.len] = compileTransformSeg(std.mem.trim(u8, chain[seg_start..], " \t"));
+    result.len += 1;
+    return result;
+}
+
+fn compileTransformSeg(seg: []const u8) CompiledTransform {
+    if (std.mem.eql(u8, seg, "negate")) return .{ .op = .negate };
+    if (std.mem.eql(u8, seg, "abs")) return .{ .op = .abs };
+    if (std.mem.startsWith(u8, seg, "scale(")) {
+        const args = parseArgs2(seg);
+        return .{ .op = .scale, .a = args.a, .b = args.b };
+    }
+    if (std.mem.startsWith(u8, seg, "clamp(")) {
+        const args = parseArgs2(seg);
+        return .{ .op = .clamp, .a = args.a, .b = args.b };
+    }
+    if (std.mem.startsWith(u8, seg, "deadzone(")) {
+        return .{ .op = .deadzone, .a = parseArgs1(seg) };
+    }
+    return .{ .op = .deadzone, .a = 0 };
+}
+
+fn runTransformChain(initial: i64, chain: *const CompiledTransformChain) i64 {
+    var val = initial;
+    const t_max = typeMaxByTag(chain.type_tag);
+    for (chain.items[0..chain.len]) |tr| {
+        val = switch (tr.op) {
+            .negate => -val,
+            .abs => blk: {
+                const clamped = if (val == std.math.minInt(i64)) std.math.maxInt(i64) else val;
+                break :blk @intCast(@abs(clamped));
+            },
+            .scale => blk: {
+                if (t_max == 0) break :blk val;
+                const v: i128 = val;
+                break :blk @intCast(@divTrunc(v * (tr.b - tr.a), t_max) + tr.a);
+            },
+            .clamp => std.math.clamp(val, tr.a, tr.b),
+            .deadzone => blk: {
+                const t: u64 = if (tr.a < 0) 0 else @intCast(tr.a);
+                break :blk if (@abs(val) < t) 0 else val;
+            },
+        };
+    }
+    return val;
+}
+
+// --- pre-compiled checksum algo ---
+
+const ChecksumAlgo = enum { sum8, xor, crc32 };
+
+const CompiledChecksum = struct {
+    algo: ChecksumAlgo,
+    range_start: usize,
+    range_end: usize,
+    expect_off: usize,
+    seed: ?i64,
+};
+
+// --- pre-compiled report ---
+
+const MAX_FIELDS = 32;
+const MAX_BUTTONS = 32;
+const MAX_REPORTS = 8;
+
+const CompiledField = struct {
+    tag: FieldTag,
+    type_tag: FieldType,
+    offset: usize,
+    transforms: CompiledTransformChain,
+    has_transform: bool,
+};
+
+const CompiledButtonEntry = struct {
+    btn_id: ButtonId,
+    bit_idx: u5,
+};
+
+const CompiledButtonGroup = struct {
+    src_off: usize,
+    src_size: usize,
+    entries: [MAX_BUTTONS]CompiledButtonEntry,
+    count: u8,
+};
+
+const CompiledReport = struct {
+    src: *const ReportConfig,
+    checksum: ?CompiledChecksum,
+    fields: [MAX_FIELDS]CompiledField,
+    field_count: u8,
+    button_group: ?CompiledButtonGroup,
+};
+
+fn compileReport(report: *const ReportConfig) CompiledReport {
+    var cr = CompiledReport{
+        .src = report,
+        .checksum = null,
+        .fields = undefined,
+        .field_count = 0,
+        .button_group = null,
+    };
+
+    if (report.checksum) |cs| {
+        if (std.meta.stringToEnum(ChecksumAlgo, cs.algo)) |algo| {
+            cr.checksum = .{
+                .algo = algo,
+                .range_start = @intCast(cs.range[0]),
+                .range_end = @intCast(cs.range[1]),
+                .expect_off = @intCast(cs.expect.offset),
+                .seed = cs.seed,
+            };
+        }
+    }
+
+    if (report.fields) |fields| {
+        var it = fields.map.iterator();
+        while (it.next()) |entry| {
+            if (cr.field_count >= MAX_FIELDS) break;
+            const name = entry.key_ptr.*;
+            const fc = entry.value_ptr.*;
+            const type_tag = parseFieldType(fc.type) orelse continue;
+            var cf = CompiledField{
+                .tag = parseFieldTag(name),
+                .type_tag = type_tag,
+                .offset = @intCast(fc.offset),
+                .transforms = undefined,
+                .has_transform = false,
+            };
+            if (fc.transform) |tr| {
+                cf.transforms = compileTransformChain(tr, type_tag);
+                cf.has_transform = true;
+            }
+            cr.fields[cr.field_count] = cf;
+            cr.field_count += 1;
+        }
+    }
+
+    if (report.button_group) |bg| {
+        var cbg = CompiledButtonGroup{
+            .src_off = @intCast(bg.source.offset),
+            .src_size = @intCast(bg.source.size),
+            .entries = undefined,
+            .count = 0,
+        };
+        var it = bg.map.map.iterator();
+        while (it.next()) |entry| {
+            if (cbg.count >= MAX_BUTTONS) break;
+            const btn_name = entry.key_ptr.*;
+            const bit_idx = entry.value_ptr.*;
+            if (std.meta.stringToEnum(ButtonId, btn_name)) |btn_id| {
+                cbg.entries[cbg.count] = .{
+                    .btn_id = btn_id,
+                    .bit_idx = @intCast(bit_idx),
+                };
+                cbg.count += 1;
+            }
+        }
+        cr.button_group = cbg;
+    }
+
+    return cr;
+}
+
+// --- Interpreter ---
+
 pub const Interpreter = struct {
-    config: *const DeviceConfig,
+    compiled: [MAX_REPORTS]CompiledReport,
+    report_count: u8,
 
     pub fn init(config: *const DeviceConfig) Interpreter {
-        return .{ .config = config };
+        var self = Interpreter{ .compiled = undefined, .report_count = 0 };
+        for (config.report) |*report| {
+            if (self.report_count >= MAX_REPORTS) break;
+            self.compiled[self.report_count] = compileReport(report);
+            self.report_count += 1;
+        }
+        return self;
     }
 
     pub fn processReport(
@@ -21,25 +307,25 @@ pub const Interpreter = struct {
         interface_id: u8,
         raw: []const u8,
     ) ProcessError!?GamepadStateDelta {
-        const report = matchReport(self.config, interface_id, raw) orelse return null;
-        if (raw.len < @as(usize, @intCast(report.size))) return null;
-        try verifyChecksum(report, raw);
+        const cr = self.matchCompiled(interface_id, raw) orelse return null;
+        if (raw.len < @as(usize, @intCast(cr.src.size))) return null;
+        try verifyChecksumCompiled(cr, raw);
         var delta = GamepadStateDelta{};
-        try extractAndFill(report, raw, &delta);
+        extractAndFillCompiled(cr, raw, &delta);
         return delta;
     }
-};
 
-fn matchReport(cfg: *const DeviceConfig, interface_id: u8, raw: []const u8) ?*const ReportConfig {
-    for (cfg.report) |*report| {
-        if (report.interface != @as(i64, interface_id)) continue;
-        if (report.match) |m| {
-            if (!checkMatch(m, raw)) continue;
+    fn matchCompiled(self: *const Interpreter, interface_id: u8, raw: []const u8) ?*const CompiledReport {
+        for (self.compiled[0..self.report_count]) |*cr| {
+            if (cr.src.interface != @as(i64, interface_id)) continue;
+            if (cr.src.match) |m| {
+                if (!checkMatch(m, raw)) continue;
+            }
+            return cr;
         }
-        return report;
+        return null;
     }
-    return null;
-}
+};
 
 fn checkMatch(m: device.MatchConfig, raw: []const u8) bool {
     const off: usize = @intCast(m.offset);
@@ -50,66 +336,51 @@ fn checkMatch(m: device.MatchConfig, raw: []const u8) bool {
     return true;
 }
 
-fn verifyChecksum(report: *const ReportConfig, raw: []const u8) ProcessError!void {
-    const cs = report.checksum orelse return;
-    const range_start: usize = @intCast(cs.range[0]);
-    const range_end: usize = @intCast(cs.range[1]);
-    const data = raw[range_start..range_end];
-    const expect_off: usize = @intCast(cs.expect.offset);
-
-    if (std.mem.eql(u8, cs.algo, "sum8")) {
-        var sum: u8 = 0;
-        for (data) |b| sum +%= b;
-        if (sum != raw[expect_off]) return ProcessError.ChecksumMismatch;
-    } else if (std.mem.eql(u8, cs.algo, "xor")) {
-        var xv: u8 = 0;
-        for (data) |b| xv ^= b;
-        if (xv != raw[expect_off]) return ProcessError.ChecksumMismatch;
-    } else if (std.mem.eql(u8, cs.algo, "crc32")) {
-        var crc = std.hash.crc.Crc32IsoHdlc.init();
-        if (cs.seed) |seed| {
-            const seed_byte: u8 = @intCast(seed & 0xff);
-            crc.update(&[_]u8{seed_byte});
-        }
-        crc.update(data);
-        const computed = crc.final();
-        const stored = std.mem.readInt(u32, raw[expect_off..][0..4], .little);
-        if (computed != stored) return ProcessError.ChecksumMismatch;
+fn verifyChecksumCompiled(cr: *const CompiledReport, raw: []const u8) ProcessError!void {
+    const cs = cr.checksum orelse return;
+    const data = raw[cs.range_start..cs.range_end];
+    switch (cs.algo) {
+        .sum8 => {
+            var sum: u8 = 0;
+            for (data) |b| sum +%= b;
+            if (sum != raw[cs.expect_off]) return ProcessError.ChecksumMismatch;
+        },
+        .xor => {
+            var xv: u8 = 0;
+            for (data) |b| xv ^= b;
+            if (xv != raw[cs.expect_off]) return ProcessError.ChecksumMismatch;
+        },
+        .crc32 => {
+            var crc = std.hash.crc.Crc32IsoHdlc.init();
+            if (cs.seed) |seed| {
+                const seed_byte: u8 = @intCast(seed & 0xff);
+                crc.update(&[_]u8{seed_byte});
+            }
+            crc.update(data);
+            const computed = crc.final();
+            const stored = std.mem.readInt(u32, raw[cs.expect_off..][0..4], .little);
+            if (computed != stored) return ProcessError.ChecksumMismatch;
+        },
     }
 }
 
-// TODO(Phase 1.1): pre-compile field name and button name lookups at config load time
-// to avoid per-frame string comparisons (MAJOR #6/#7). Acceptable for <20 fields (Vader 5 ~15).
-fn extractAndFill(report: *const ReportConfig, raw: []const u8, delta: *GamepadStateDelta) ProcessError!void {
-    if (report.fields) |fields| {
-        var it = fields.map.iterator();
-        while (it.next()) |entry| {
-            const name = entry.key_ptr.*;
-            const field = entry.value_ptr.*;
-            const off: usize = @intCast(field.offset);
-            var val: i64 = readField(raw, off, field.type);
-            if (field.transform) |tr| val = applyTransformChain(val, tr, field.type);
-            fillDeltaField(delta, name, val);
-        }
+fn extractAndFillCompiled(cr: *const CompiledReport, raw: []const u8, delta: *GamepadStateDelta) void {
+    for (cr.fields[0..cr.field_count]) |*cf| {
+        var val = readFieldByTag(raw, cf.offset, cf.type_tag);
+        if (cf.has_transform) val = runTransformChain(val, &cf.transforms);
+        applyFieldTag(delta, cf.tag, val);
     }
 
-    if (report.button_group) |bg| {
-        const src_off: usize = @intCast(bg.source.offset);
-        const src_size: usize = @intCast(bg.source.size);
-        const src_val = readUintBytes(raw, src_off, src_size);
+    if (cr.button_group) |*cbg| {
+        const src_val = readUintBytes(raw, cbg.src_off, cbg.src_size);
         var bits: u32 = delta.buttons orelse 0;
-        var btn_it = bg.map.map.iterator();
-        while (btn_it.next()) |entry| {
-            const btn_name = entry.key_ptr.*;
-            const bit_idx: usize = @intCast(entry.value_ptr.*);
-            const pressed = (src_val >> @intCast(bit_idx)) & 1 == 1;
-            if (std.meta.stringToEnum(ButtonId, btn_name)) |btn_id| {
-                const btn_bit: u5 = @intCast(@intFromEnum(btn_id));
-                if (pressed) {
-                    bits |= @as(u32, 1) << btn_bit;
-                } else {
-                    bits &= ~(@as(u32, 1) << btn_bit);
-                }
+        for (cbg.entries[0..cbg.count]) |entry| {
+            const pressed = (src_val >> @intCast(entry.bit_idx)) & 1 == 1;
+            const btn_bit: u5 = @intCast(@intFromEnum(entry.btn_id));
+            if (pressed) {
+                bits |= @as(u32, 1) << btn_bit;
+            } else {
+                bits &= ~(@as(u32, 1) << btn_bit);
             }
         }
         delta.buttons = bits;
@@ -122,62 +393,6 @@ fn readUintBytes(raw: []const u8, off: usize, size: usize) u64 {
     while (i < size) : (i += 1) {
         val |= @as(u64, raw[off + i]) << @intCast(i * 8);
     }
-    return val;
-}
-
-fn readField(raw: []const u8, off: usize, type_str: []const u8) i64 {
-    if (std.mem.eql(u8, type_str, "u8")) return raw[off];
-    if (std.mem.eql(u8, type_str, "i8")) return @as(i8, @bitCast(raw[off]));
-    if (std.mem.eql(u8, type_str, "u16le")) return std.mem.readInt(u16, raw[off..][0..2], .little);
-    if (std.mem.eql(u8, type_str, "i16le")) return std.mem.readInt(i16, raw[off..][0..2], .little);
-    if (std.mem.eql(u8, type_str, "u16be")) return std.mem.readInt(u16, raw[off..][0..2], .big);
-    if (std.mem.eql(u8, type_str, "i16be")) return std.mem.readInt(i16, raw[off..][0..2], .big);
-    if (std.mem.eql(u8, type_str, "u32le")) return std.mem.readInt(u32, raw[off..][0..4], .little);
-    if (std.mem.eql(u8, type_str, "i32le")) return std.mem.readInt(i32, raw[off..][0..4], .little);
-    return 0;
-}
-
-fn typeMax(type_str: []const u8) i64 {
-    if (std.mem.eql(u8, type_str, "u8")) return 255;
-    if (std.mem.eql(u8, type_str, "i8")) return 127;
-    if (std.mem.eql(u8, type_str, "u16le") or std.mem.eql(u8, type_str, "u16be")) return 65535;
-    if (std.mem.eql(u8, type_str, "i16le") or std.mem.eql(u8, type_str, "i16be")) return 32767;
-    if (std.mem.eql(u8, type_str, "u32le") or std.mem.eql(u8, type_str, "u32be")) return 4294967295;
-    if (std.mem.eql(u8, type_str, "i32le") or std.mem.eql(u8, type_str, "i32be")) return 2147483647;
-    return 1;
-}
-
-fn applyTransformChain(initial: i64, chain: []const u8, type_str: []const u8) i64 {
-    var val = initial;
-    var pos: usize = 0;
-    var depth: usize = 0;
-    var seg_start: usize = 0;
-    while (pos < chain.len) : (pos += 1) {
-        switch (chain[pos]) {
-            '(' => depth += 1,
-            ')' => if (depth > 0) {
-                depth -= 1;
-            },
-            ',' => if (depth == 0) {
-                val = applyTransform(val, std.mem.trim(u8, chain[seg_start..pos], " \t"), type_str);
-                seg_start = pos + 1;
-            },
-            else => {},
-        }
-    }
-    return applyTransform(val, std.mem.trim(u8, chain[seg_start..], " \t"), type_str);
-}
-
-fn applyTransform(val: i64, seg: []const u8, type_str: []const u8) i64 {
-    if (std.mem.eql(u8, seg, "negate")) return -val;
-    if (std.mem.eql(u8, seg, "abs")) {
-        // clamp minInt to avoid @abs overflow
-        const clamped = if (val == std.math.minInt(i64)) std.math.maxInt(i64) else val;
-        return @intCast(@abs(clamped));
-    }
-    if (std.mem.startsWith(u8, seg, "scale(")) return applyScale(val, seg, type_str);
-    if (std.mem.startsWith(u8, seg, "clamp(")) return applyClamp(val, seg);
-    if (std.mem.startsWith(u8, seg, "deadzone(")) return applyDeadzone(val, seg);
     return val;
 }
 
@@ -198,58 +413,6 @@ fn parseArgs1(seg: []const u8) i64 {
     const inner_end = std.mem.lastIndexOfScalar(u8, seg, ')') orelse return 0;
     const arg_str = std.mem.trim(u8, seg[inner_start + 1 .. inner_end], " \t");
     return std.fmt.parseInt(i64, arg_str, 10) catch 0;
-}
-
-fn applyScale(val: i64, seg: []const u8, type_str: []const u8) i64 {
-    const args = parseArgs2(seg);
-    const out_min = args.a;
-    const out_max = args.b;
-    const t_max = typeMax(type_str);
-    if (t_max == 0) return val;
-    // Use i128 to avoid overflow in intermediate multiply
-    const v: i128 = val;
-    const result = @divTrunc(v * (out_max - out_min), t_max) + out_min;
-    return @intCast(result);
-}
-
-fn applyClamp(val: i64, seg: []const u8) i64 {
-    const args = parseArgs2(seg);
-    return std.math.clamp(val, args.a, args.b);
-}
-
-fn applyDeadzone(val: i64, seg: []const u8) i64 {
-    const threshold = parseArgs1(seg);
-    const t: u64 = if (threshold < 0) 0 else @intCast(threshold);
-    return if (@abs(val) < t) 0 else val;
-}
-
-fn fillDeltaField(delta: *GamepadStateDelta, name: []const u8, val: i64) void {
-    if (std.mem.eql(u8, name, "left_x") or std.mem.eql(u8, name, "ax")) {
-        delta.ax = @truncate(val);
-    } else if (std.mem.eql(u8, name, "left_y") or std.mem.eql(u8, name, "ay")) {
-        delta.ay = @truncate(val);
-    } else if (std.mem.eql(u8, name, "right_x") or std.mem.eql(u8, name, "rx")) {
-        delta.rx = @truncate(val);
-    } else if (std.mem.eql(u8, name, "right_y") or std.mem.eql(u8, name, "ry")) {
-        delta.ry = @truncate(val);
-    } else if (std.mem.eql(u8, name, "lt")) {
-        delta.lt = @intCast(val & 0xff);
-    } else if (std.mem.eql(u8, name, "rt")) {
-        delta.rt = @intCast(val & 0xff);
-    } else if (std.mem.eql(u8, name, "gyro_x")) {
-        delta.gyro_x = @truncate(val);
-    } else if (std.mem.eql(u8, name, "gyro_y")) {
-        delta.gyro_y = @truncate(val);
-    } else if (std.mem.eql(u8, name, "gyro_z")) {
-        delta.gyro_z = @truncate(val);
-    } else if (std.mem.eql(u8, name, "accel_x")) {
-        delta.accel_x = @truncate(val);
-    } else if (std.mem.eql(u8, name, "accel_y")) {
-        delta.accel_y = @truncate(val);
-    } else if (std.mem.eql(u8, name, "accel_z")) {
-        delta.accel_z = @truncate(val);
-    }
-    // unknown fields silently ignored
 }
 
 // --- tests ---
