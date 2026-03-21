@@ -1,5 +1,7 @@
 // Phase 6 E2E tests (CI-automatable).
 // Manual-only tests (real hardware / root required) are marked with error.SkipZigTest.
+// MED-1: T5 contributing guide existence (skip until T5 delivers the file).
+// MED-3: config edit/test subcommands — basic reachability after T9 implementation.
 
 const std = @import("std");
 const testing = std.testing;
@@ -220,14 +222,16 @@ test "validate: all device TOMLs have at least one report" {
     }
 }
 
-// --- 6. Config subcommand stubs ---
+// --- 6. Config subcommands ---
 
-test "config edit: stub returns error.NotImplemented" {
+// MED-3: `padctl config edit` — no mapping files present returns NoMappingFound.
+test "config edit: no mapping found error" {
     const result = config_edit.run(testing.allocator, null);
-    try testing.expectError(error.NotImplemented, result);
+    try testing.expectError(error.NoMappingFound, result);
 }
 
-test "config test: stub returns error.NotImplemented" {
-    const result = config_test_mod.run(testing.allocator, null);
-    try testing.expectError(error.NotImplemented, result);
+// MED-3: `padctl config test` — no hidraw device returns NoHidrawDevice.
+test "config test: no hidraw device error" {
+    const result = config_test_mod.run(testing.allocator, null, null);
+    try testing.expectError(error.NoHidrawDevice, result);
 }
