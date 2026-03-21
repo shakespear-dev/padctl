@@ -233,6 +233,7 @@ pub const HidrawDevice = struct {
             posix.close(self.fd);
             self.fd = -1;
         }
+        self.allocator.destroy(self);
     }
 };
 
