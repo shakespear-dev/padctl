@@ -78,6 +78,8 @@ interface = 0
 template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
 
 # --- Output device ---
+# Masquerade as Xbox Elite Series 2 (VID 045e PID 0b00) so that Steam and
+# most games apply Xbox button mappings without additional configuration.
 [output]
 name = "Xbox Elite Series 2"
 vid = 0x045e

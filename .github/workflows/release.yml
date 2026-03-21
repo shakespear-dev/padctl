@@ -25,9 +25,6 @@ jobs:
       - name: Build
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dlibusb=false
 
-      - name: Strip
-        run: strip zig-out/bin/padctl
-
       - name: Package
         run: |
           VERSION=${{ github.ref_name }}

@@ -1,3 +1,5 @@
+# WIP: 12-bit stick axes require cross-byte bitfield extraction (Phase 2).
+# Raw LSB bytes are mapped for now; full 12-bit resolution pending.
 [device]
 name = "Nintendo Switch Pro Controller"
 vid = 0x057e

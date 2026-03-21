@@ -80,6 +80,34 @@ fn validateExtended(
                 .{ report.name, cs.algo });
         }
     }
+
+    // Pass 8: report.interface and commands.*.interface must reference a declared device.interface id
+    for (cfg.report) |report| {
+        var found = false;
+        for (cfg.device.interface) |iface| {
+            if (iface.id == report.interface) { found = true; break; }
+        }
+        if (!found) {
+            try addError(errors, allocator, file,
+                "report '{s}': interface {d} not declared in device.interface",
+                .{ report.name, report.interface });
+        }
+    }
+    if (cfg.commands) |cmds| {
+        var it = cmds.map.iterator();
+        while (it.next()) |entry| {
+            const cmd = entry.value_ptr.*;
+            var found = false;
+            for (cfg.device.interface) |iface| {
+                if (iface.id == cmd.interface) { found = true; break; }
+            }
+            if (!found) {
+                try addError(errors, allocator, file,
+                    "command '{s}': interface {d} not declared in device.interface",
+                    .{ entry.key_ptr.*, cmd.interface });
+            }
+        }
+    }
 }
 
 /// Validate a single TOML file. Returns a slice of errors (caller owns, call freeErrors).
@@ -333,6 +361,33 @@ test "validate devices/microsoft/xbox-elite.toml: 0 errors" {
         for (errors) |e| std.debug.print("  error: {s}\n", .{e.message});
     }
     try testing.expectEqual(@as(usize, 0), errors.len);
+}
+
+test "undeclared interface in report: error reported" {
+    const allocator = testing.allocator;
+    const bad =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 99
+        \\size = 8
+        \\[output]
+        \\name = "T"
+    ;
+    const errors = try validateString(allocator, bad);
+    defer freeErrors(errors, allocator);
+    try testing.expect(errors.len > 0);
+    var found = false;
+    for (errors) |e| {
+        if (std.mem.indexOf(u8, e.message, "interface 99") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "validate devices/flydigi/vader5.toml: 0 errors" {

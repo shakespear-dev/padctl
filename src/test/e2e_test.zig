@@ -263,6 +263,6 @@ test "EventLoop pipeline: A press then release" {
 
 // --- Layer 2 (manual) ---
 // 1. zig build -Doptimize=Debug
-// 2. sudo ./zig-out/bin/padctl --config devices/flydigi-vader5.toml
+// 2. sudo ./zig-out/bin/padctl --config devices/flydigi/vader5.toml
 // 3. evtest /dev/input/eventN — verify axes and buttons
 // 4. jstest --normal /dev/input/jsN — verify joystick
