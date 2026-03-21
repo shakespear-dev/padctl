@@ -346,15 +346,28 @@ pub const Supervisor = struct {
         }
         defer self.stopAll();
 
-        var pollfds = [5]posix.pollfd{
-            .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 },
-        };
-        // nfds caps the slice to exclude fd=-1 slots; ppoll returns POLLNVAL for negative fds
-        const nfds: usize = if (self.inotify_fd >= 0) 5 else if (self.netlink_fd >= 0) 3 else 2;
+        var pollfds: [5]posix.pollfd = undefined;
+        pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
+        pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
+        var nfds: usize = 2;
+        const netlink_slot: ?usize = if (self.netlink_fd >= 0) blk: {
+            pollfds[nfds] = .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = nfds;
+            nfds += 1;
+            break :blk s;
+        } else null;
+        const inotify_slot: ?usize = if (self.inotify_fd >= 0) blk: {
+            pollfds[nfds] = .{ .fd = self.inotify_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = nfds;
+            nfds += 1;
+            break :blk s;
+        } else null;
+        const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
+            pollfds[nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = nfds;
+            nfds += 1;
+            break :blk s;
+        } else null;
 
         while (true) {
             _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
@@ -375,21 +388,27 @@ pub const Supervisor = struct {
                 pollfds[1].revents = 0;
             }
 
-            if (pollfds[2].revents & posix.POLL.IN != 0) {
-                self.drainNetlink();
-                pollfds[2].revents = 0;
+            if (netlink_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainNetlink();
+                    pollfds[slot].revents = 0;
+                }
             }
 
-            if (pollfds[3].revents & posix.POLL.IN != 0) {
-                self.drainInotify();
-                pollfds[3].revents = 0;
+            if (inotify_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainInotify();
+                    pollfds[slot].revents = 0;
+                }
             }
 
-            if (pollfds[4].revents & posix.POLL.IN != 0) {
-                var tbuf: [8]u8 = undefined;
-                _ = posix.read(self.debounce_fd, &tbuf) catch {};
-                self.doReload(reloadFn, reload_allocator, initFn);
-                pollfds[4].revents = 0;
+            if (debounce_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    var tbuf: [8]u8 = undefined;
+                    _ = posix.read(self.debounce_fd, &tbuf) catch {};
+                    self.doReload(reloadFn, reload_allocator, initFn);
+                    pollfds[slot].revents = 0;
+                }
             }
         }
     }
