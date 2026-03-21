@@ -76,6 +76,7 @@ pub const DeviceInstance = struct {
     device_cfg: *const DeviceConfig,
     pending_mapping: ?*MappingConfig,
     stopped: bool,
+    poll_timeout_ms: ?u32 = null,
 
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
     pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig) !DeviceInstance {
@@ -171,6 +172,7 @@ pub const DeviceInstance = struct {
                 .aux_output = aux_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
+                .poll_timeout_ms = self.poll_timeout_ms,
             });
         }
     }
@@ -239,6 +241,7 @@ fn testInstance(
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
     };
 }
 
@@ -319,6 +322,7 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
         .device_cfg = &parsed.value,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
     };
     defer {
         inst.mapper.?.deinit();

@@ -84,6 +84,7 @@ fn testInstance(
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
     };
 }
 
@@ -359,6 +360,7 @@ test "T7: hot-reload — updateMapping swaps config; next apply uses new mapping
         .device_cfg = &parsed_dev.value,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
     };
     defer {
         inst.mapper.?.deinit();

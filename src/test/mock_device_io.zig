@@ -40,7 +40,7 @@ pub const MockDeviceIO = struct {
     pub fn deinit(self: *MockDeviceIO) void {
         self.write_log.deinit(self.allocator);
         posix.close(self.pipe_r);
-        posix.close(self.pipe_w);
+        if (self.pipe_w >= 0) posix.close(self.pipe_w);
     }
 
     /// Signal the pipe_r side as readable (triggers ppoll).
@@ -68,7 +68,14 @@ pub const MockDeviceIO = struct {
     fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
         const self: *MockDeviceIO = @ptrCast(@alignCast(ptr));
         if (self.disconnected) return DeviceIO.ReadError.Disconnected;
-        if (self.frame_idx >= self.frames.len) return DeviceIO.ReadError.Again;
+        if (self.frame_idx >= self.frames.len) {
+            // Close write end once all frames consumed — ppoll sees POLLHUP and returns.
+            if (self.pipe_w >= 0) {
+                posix.close(self.pipe_w);
+                self.pipe_w = -1;
+            }
+            return DeviceIO.ReadError.Again;
+        }
         const frame = self.frames[self.frame_idx];
         self.frame_idx += 1;
         const n = @min(buf.len, frame.len);

@@ -296,6 +296,7 @@ fn makeInstance(allocator: std.mem.Allocator, mock: *MockDeviceIO, cfg: *const d
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
     };
     return inst;
 }

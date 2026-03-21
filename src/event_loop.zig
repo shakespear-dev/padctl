@@ -56,6 +56,7 @@ pub const EventLoopContext = struct {
     aux_output: ?@import("io/uinput.zig").AuxOutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
+    poll_timeout_ms: ?u32 = null,
 };
 
 pub const EventLoop = struct {
@@ -153,8 +154,13 @@ pub const EventLoop = struct {
         self.running = true;
         var buf: [64]u8 = undefined;
 
+        const timeout: ?posix.timespec = if (ctx.poll_timeout_ms) |ms|
+            .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) }
+        else
+            null;
+
         while (self.running) {
-            _ = posix.ppoll(self.pollfds[0..self.fd_count], null, null) catch |err| switch (err) {
+            _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
@@ -217,6 +223,13 @@ pub const EventLoop = struct {
             for (ctx.devices, 0..) |dev, i| {
                 const slot = self.device_base + i;
                 if (slot >= self.fd_count) break;
+
+                // POLLHUP/POLLERR means the peer closed — treat as disconnect.
+                if (self.pollfds[slot].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                    self.running = false;
+                    break;
+                }
+
                 if (self.pollfds[slot].revents & posix.POLL.IN == 0) continue;
 
                 // Drain all available frames from this device
@@ -346,6 +359,7 @@ test "EventLoop: Disconnected device causes loop to exit without panic" {
         .devices = &devs,
         .interpreter = &interp,
         .output = output,
+        .poll_timeout_ms = 100,
     };
 
     // Inject disconnect before run() — loop should read Disconnected and exit
@@ -495,7 +509,7 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     var devs = [_]DeviceIO{dev};
     var ctx = RunCtx{
         .loop = &loop,
-        .elc = .{ .devices = &devs, .interpreter = &interp, .output = MockOut.outputDevice(), .mapper = &m },
+        .elc = .{ .devices = &devs, .interpreter = &interp, .output = MockOut.outputDevice(), .mapper = &m, .poll_timeout_ms = 100 },
     };
 
     const T = struct {
@@ -603,7 +617,7 @@ test "EventLoop mini: device frame dispatched to interpreter and output" {
     var devs = [_]DeviceIO{dev};
     var ctx = RunCtx{
         .loop = &loop,
-        .elc = .{ .devices = &devs, .interpreter = &interp, .output = output },
+        .elc = .{ .devices = &devs, .interpreter = &interp, .output = output, .poll_timeout_ms = 100 },
     };
 
     const T = struct {
@@ -716,7 +730,7 @@ test "T4: FF event routed to DeviceIO.write via fillTemplate" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg });
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
@@ -777,7 +791,7 @@ test "T4: no commands.rumble — silent skip" {
 
     const T = struct {
         fn run(c: *RunCtx) !void {
-            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg });
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
         }
     };
     const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});

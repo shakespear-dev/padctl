@@ -483,6 +483,7 @@ fn makeTestInstance(
         .device_cfg = cfg,
         .pending_mapping = null,
         .stopped = false,
+        .poll_timeout_ms = 100,
     };
     return inst;
 }

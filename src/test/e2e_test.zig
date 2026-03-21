@@ -7,6 +7,8 @@ const state_mod = @import("../core/state.zig");
 const uinput = @import("../io/uinput.zig");
 const MockDeviceIO = @import("mock_device_io.zig").MockDeviceIO;
 const EventLoop = @import("../event_loop.zig").EventLoop;
+const EventLoopContext = @import("../event_loop.zig").EventLoopContext;
+const DeviceIO = @import("../io/device_io.zig").DeviceIO;
 
 const Interpreter = interpreter_mod.Interpreter;
 const GamepadState = state_mod.GamepadState;
@@ -234,18 +236,21 @@ test "EventLoop pipeline: A press then release" {
 
     try mock.signal();
 
-    var devs = [_]@import("../io/device_io.zig").DeviceIO{dev};
+    var devs = [_]DeviceIO{dev};
+    const RunCtx = struct {
+        loop: *EventLoop,
+        elc: EventLoopContext,
+    };
+    var ctx = RunCtx{
+        .loop = &loop,
+        .elc = .{ .devices = &devs, .interpreter = &interp, .output = output, .poll_timeout_ms = 100 },
+    };
     const T = struct {
-        fn run(
-            el: *EventLoop,
-            devices: []@import("../io/device_io.zig").DeviceIO,
-            ip: *const Interpreter,
-            op: uinput.OutputDevice,
-        ) !void {
-            try el.run(devices, ip, op, null, null, null, null);
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(c.elc);
         }
     };
-    const thread = try std.Thread.spawn(.{}, T.run, .{ &loop, &devs, &interp, output });
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
     std.Thread.sleep(15 * std.time.ns_per_ms);
     loop.stop();
     thread.join();
