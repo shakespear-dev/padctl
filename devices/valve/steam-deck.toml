@@ -1,0 +1,95 @@
+[device]
+name = "Valve Steam Deck"
+vid = 0x28de
+pid = 0x1205
+
+[[device.interface]]
+id = 0
+class = "hid"
+
+# --- Input report (Report ID 0x09, 64 bytes) ---
+# Header bytes 0-3: version, report_type=0x09, size, counter
+# frame_counter: bytes 4-7 u32le
+# buttons: bytes 8-15 bitfield
+# trackpad L X/Y: bytes 16-17/18-19 i16le
+# trackpad R X/Y: bytes 20-21/22-23 i16le
+# accel X/Y/Z: bytes 24-25/26-27/28-29 i16le
+# gyro pitch/yaw/roll: bytes 30-31/32-33/34-35 i16le
+# trigger L/R pressure: bytes 44-45/46-47 u16le
+# stick L X/Y R X/Y: bytes 48-49/50-51/52-53/54-55 i16le
+# trackpad force L/R: bytes 56-57/58-59 u16le
+[[report]]
+name = "main"
+interface = 0
+size = 64
+
+[report.match]
+offset = 1
+expect = [0x09]
+
+[report.fields]
+left_x        = { offset = 48, type = "i16le" }
+left_y        = { offset = 50, type = "i16le", transform = "negate" }
+right_x       = { offset = 52, type = "i16le" }
+right_y       = { offset = 54, type = "i16le", transform = "negate" }
+lt            = { offset = 44, type = "u16le", transform = "scale(0, 255)" }
+rt            = { offset = 46, type = "u16le", transform = "scale(0, 255)" }
+gyro_x        = { offset = 30, type = "i16le" }
+gyro_y        = { offset = 32, type = "i16le" }
+gyro_z        = { offset = 34, type = "i16le" }
+accel_x       = { offset = 24, type = "i16le" }
+accel_y       = { offset = 26, type = "i16le" }
+accel_z       = { offset = 28, type = "i16le" }
+
+# Buttons layout (bytes 8-15, 64 bits total):
+# byte 8:  bit0=RT_dig bit1=LT_dig bit2=RS bit3=LS bit4=Y bit5=B bit6=X bit7=A
+# byte 9:  bit0=DPadUp bit1=DPadRight bit2=DPadLeft bit3=DPadDown bit4=L4 bit5=R4 bit6=L5 bit7=R5
+# byte 10: bit0=Menu bit1=Steam bit2=Select bit3=L3_touch bit4=R3_touch
+# button_group covers bytes 8-11 (4 bytes = 32 bits)
+[report.button_group]
+source = { offset = 8, size = 4 }
+map = { RT = 0, LT = 1, RS = 2, LS = 3, Y = 4, B = 5, X = 6, A = 7, DPadUp = 8, DPadRight = 9, DPadLeft = 10, DPadDown = 11, M1 = 12, M2 = 13, M3 = 14, M4 = 15, Start = 16, Home = 17, Select = 18 }
+
+# --- Haptic Pulse output (Report ID 0x8F, 9 bytes) ---
+# byte 0=0x8F side(u8) amplitude(u16le) period(u16le) count(u16le)
+[commands.rumble]
+interface = 0
+template = "8f 00 {strong:u8} 00 00 10 00 01 00"
+
+# --- Output device ---
+[output]
+name = "Valve Steam Deck"
+vid = 0x28de
+pid = 0x1205
+
+[output.axes]
+left_x  = { code = "ABS_X",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+left_y  = { code = "ABS_Y",  min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_x = { code = "ABS_RX", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+right_y = { code = "ABS_RY", min = -32768, max = 32767, fuzz = 16, flat = 128 }
+lt      = { code = "ABS_Z",  min = 0, max = 255 }
+rt      = { code = "ABS_RZ", min = 0, max = 255 }
+
+[output.buttons]
+A      = "BTN_SOUTH"
+B      = "BTN_EAST"
+X      = "BTN_WEST"
+Y      = "BTN_NORTH"
+LT     = "BTN_TL2"
+RT     = "BTN_TR2"
+Select = "BTN_SELECT"
+Start  = "BTN_START"
+Home   = "BTN_MODE"
+LS     = "BTN_THUMBL"
+RS     = "BTN_THUMBR"
+M1     = "BTN_TRIGGER_HAPPY1"
+M2     = "BTN_TRIGGER_HAPPY2"
+M3     = "BTN_TRIGGER_HAPPY3"
+M4     = "BTN_TRIGGER_HAPPY4"
+
+[output.dpad]
+type = "hat"
+
+[output.force_feedback]
+type = "rumble"
+max_effects = 4
