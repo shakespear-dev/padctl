@@ -204,8 +204,12 @@ test "e2e: suppress/inject — layer ACTIVE: A→mouse_left overrides base A→K
     var found_key_f13 = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
-            .mouse_button => |mb| if (mb.code == BTN_LEFT) { found_mouse_left = true; },
-            .key => |k| if (k.code == KEY_F13) { found_key_f13 = true; },
+            .mouse_button => |mb| if (mb.code == BTN_LEFT) {
+                found_mouse_left = true;
+            },
+            .key => |k| if (k.code == KEY_F13) {
+                found_key_f13 = true;
+            },
             else => {},
         }
     }
@@ -348,7 +352,9 @@ test "e2e: dual uinput routing — same frame: gamepad remap + key remap both ro
     var found_f1 = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_F1 and k.pressed) { found_f1 = true; },
+            .key => |k| if (k.code == KEY_F1 and k.pressed) {
+                found_f1 = true;
+            },
             else => {},
         }
     }
@@ -372,7 +378,9 @@ test "e2e: dpad arrows — dpad_y=-1 (first press) → KEY_UP press" {
     var found_key_up_press = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_UP and k.pressed) { found_key_up_press = true; },
+            .key => |k| if (k.code == KEY_UP and k.pressed) {
+                found_key_up_press = true;
+            },
             else => {},
         }
     }
@@ -397,7 +405,9 @@ test "e2e: dpad arrows — dpad_y returns to 0 → KEY_UP release" {
     var found_key_up_release = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_UP and !k.pressed) { found_key_up_release = true; },
+            .key => |k| if (k.code == KEY_UP and !k.pressed) {
+                found_key_up_release = true;
+            },
             else => {},
         }
     }
@@ -502,7 +512,9 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
     var found_f1 = false;
     for (ev1.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_F1) { found_f1 = true; },
+            .key => |k| if (k.code == KEY_F1) {
+                found_f1 = true;
+            },
             else => {},
         }
     }
@@ -520,7 +532,9 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
     var no_f1 = true;
     for (ev2.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_F1) { no_f1 = false; },
+            .key => |k| if (k.code == KEY_F1) {
+                no_f1 = false;
+            },
             else => {},
         }
     }
@@ -557,7 +571,9 @@ test "e2e: layer remap fall-through — button not in layer remap uses base rema
     var found_f13 = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_F13) { found_f13 = true; },
+            .key => |k| if (k.code == KEY_F13) {
+                found_f13 = true;
+            },
             else => {},
         }
     }

@@ -423,7 +423,9 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
             .close = mockClose,
         };
         fn mockEmit(_: *anyopaque, _: state.GamepadState) anyerror!void {}
-        fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent { return null; }
+        fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
+            return null;
+        }
         fn mockClose(_: *anyopaque) void {}
     };
 

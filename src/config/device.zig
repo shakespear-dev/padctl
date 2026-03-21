@@ -149,7 +149,9 @@ fn isValidTransformChain(chain: []const u8) bool {
     while (pos < chain.len) : (pos += 1) {
         switch (chain[pos]) {
             '(' => depth += 1,
-            ')' => if (depth > 0) { depth -= 1; },
+            ')' => if (depth > 0) {
+                depth -= 1;
+            },
             ',' => if (depth == 0) {
                 if (!isValidTransform(chain[seg_start..pos])) return false;
                 seg_start = pos + 1;

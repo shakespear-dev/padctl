@@ -16,16 +16,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install libusb
+        run: sudo apt-get install -y libusb-1.0-0-dev
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.15.2
       - name: Build
         run: zig build
       - name: Validate all device configs
         run: |
-          ./zig-out/bin/padctl --validate \
-            devices/sony/dualsense.toml \
-            devices/nintendo/switch-pro.toml \
-            devices/8bitdo/ultimate.toml \
-            devices/microsoft/xbox-elite.toml \
-            devices/flydigi/vader5.toml
+          for f in devices/**/*.toml; do
+            [ -f "$f" ] || continue
+            ./zig-out/bin/padctl --validate "$f"
+          done

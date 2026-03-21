@@ -1,2 +1,0 @@
-openspec/changes/*/tasks.md merge=openplan-task-merge
-*.md diff=markdown

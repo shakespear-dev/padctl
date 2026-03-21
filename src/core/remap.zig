@@ -77,7 +77,7 @@ pub const Remap = struct {
                     // released: target bit stays cleared (suppressed above, not re-set)
                 },
                 .disabled => {},
-                .macro => {},  // handled by MacroPlayer (T4)
+                .macro => {}, // handled by MacroPlayer (T4)
             }
         }
     }

@@ -48,13 +48,10 @@ fn validateExtended(
             while (it.next()) |entry| {
                 const bit_idx = entry.value_ptr.*;
                 if (bit_idx < 0 or bit_idx >= max_bits) {
-                    try addError(errors, allocator, file,
-                        "report '{s}': button '{s}' bit_index {d} out of range (group size {d} bytes = {d} bits)",
-                        .{ report.name, entry.key_ptr.*, bit_idx, bg.source.size, max_bits });
+                    try addError(errors, allocator, file, "report '{s}': button '{s}' bit_index {d} out of range (group size {d} bytes = {d} bits)", .{ report.name, entry.key_ptr.*, bit_idx, bg.source.size, max_bits });
                 }
             }
         }
-
     }
 
     // Pass 6: match overlap — reports sharing the same interface and same match.offset + expect
@@ -65,9 +62,7 @@ fn validateExtended(
             if (r1.interface != r2.interface) continue;
             if (m1.offset != m2.offset) continue;
             if (!std.mem.eql(i64, m1.expect, m2.expect)) continue;
-            try addError(errors, allocator, file,
-                "reports '{s}' and '{s}' have identical match conditions (interface {d}, offset {d})",
-                .{ r1.name, r2.name, r1.interface, m1.offset });
+            try addError(errors, allocator, file, "reports '{s}' and '{s}' have identical match conditions (interface {d}, offset {d})", .{ r1.name, r2.name, r1.interface, m1.offset });
         }
     }
 
@@ -75,9 +70,7 @@ fn validateExtended(
     for (cfg.report) |report| {
         const cs = report.checksum orelse continue;
         if (!isValidChecksumAlgo(cs.algo)) {
-            try addError(errors, allocator, file,
-                "report '{s}': unknown checksum algo '{s}' (valid: crc32, crc8, xor, none)",
-                .{ report.name, cs.algo });
+            try addError(errors, allocator, file, "report '{s}': unknown checksum algo '{s}' (valid: crc32, crc8, xor, none)", .{ report.name, cs.algo });
         }
     }
 
@@ -85,12 +78,13 @@ fn validateExtended(
     for (cfg.report) |report| {
         var found = false;
         for (cfg.device.interface) |iface| {
-            if (iface.id == report.interface) { found = true; break; }
+            if (iface.id == report.interface) {
+                found = true;
+                break;
+            }
         }
         if (!found) {
-            try addError(errors, allocator, file,
-                "report '{s}': interface {d} not declared in device.interface",
-                .{ report.name, report.interface });
+            try addError(errors, allocator, file, "report '{s}': interface {d} not declared in device.interface", .{ report.name, report.interface });
         }
     }
     if (cfg.commands) |cmds| {
@@ -99,12 +93,13 @@ fn validateExtended(
             const cmd = entry.value_ptr.*;
             var found = false;
             for (cfg.device.interface) |iface| {
-                if (iface.id == cmd.interface) { found = true; break; }
+                if (iface.id == cmd.interface) {
+                    found = true;
+                    break;
+                }
             }
             if (!found) {
-                try addError(errors, allocator, file,
-                    "command '{s}': interface {d} not declared in device.interface",
-                    .{ entry.key_ptr.*, cmd.interface });
+                try addError(errors, allocator, file, "command '{s}': interface {d} not declared in device.interface", .{ entry.key_ptr.*, cmd.interface });
             }
         }
     }

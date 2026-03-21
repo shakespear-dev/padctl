@@ -151,7 +151,9 @@ test "e2e: gyro activate hold_RB — RB held produces REL, released produces non
     const ev_active = try m.apply(.{ .buttons = rb, .gyro_x = 10000, .gyro_y = 10000 }, 16);
     var has_rel = false;
     for (ev_active.aux.slice()) |e| switch (e) {
-        .rel => { has_rel = true; },
+        .rel => {
+            has_rel = true;
+        },
         else => {},
     };
     try testing.expect(has_rel);
@@ -289,7 +291,9 @@ test "e2e: dt_ms scaling — 4 frames@4ms == 1 frame@16ms (right stick mouse)" {
     for (0..4) |_| {
         const ev = try m4.apply(.{ .rx = 10000 }, 4);
         for (ev.aux.slice()) |e| switch (e) {
-            .rel => |r| if (r.code == REL_X) { total4 += r.value; },
+            .rel => |r| if (r.code == REL_X) {
+                total4 += r.value;
+            },
             else => {},
         };
     }
@@ -297,7 +301,9 @@ test "e2e: dt_ms scaling — 4 frames@4ms == 1 frame@16ms (right stick mouse)" {
     var total16: i32 = 0;
     const ev16 = try m16.apply(.{ .rx = 10000 }, 16);
     for (ev16.aux.slice()) |e| switch (e) {
-        .rel => |r| if (r.code == REL_X) { total16 += r.value; },
+        .rel => |r| if (r.code == REL_X) {
+            total16 += r.value;
+        },
         else => {},
     };
 

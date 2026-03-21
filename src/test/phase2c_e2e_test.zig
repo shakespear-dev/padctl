@@ -401,7 +401,9 @@ test "T7: hot-reload — updateMapping swaps config; next apply uses new mapping
     var found_key_a = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
-            .key => |k| if (k.code == KEY_A and k.pressed) { found_key_a = true; },
+            .key => |k| if (k.code == KEY_A and k.pressed) {
+                found_key_a = true;
+            },
             else => {},
         }
     }

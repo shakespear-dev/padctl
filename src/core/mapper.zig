@@ -144,8 +144,14 @@ pub const Mapper = struct {
                     if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
                     if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
                 } else if (std.mem.eql(u8, gcfg.mode, "joystick")) {
-                    if (gout.joy_x) |jx| { gyro_joy_x = jx; suppress_right_stick_gyro = true; }
-                    if (gout.joy_y) |jy| { gyro_joy_y = jy; suppress_right_stick_gyro = true; }
+                    if (gout.joy_x) |jx| {
+                        gyro_joy_x = jx;
+                        suppress_right_stick_gyro = true;
+                    }
+                    if (gout.joy_y) |jy| {
+                        gyro_joy_y = jy;
+                        suppress_right_stick_gyro = true;
+                    }
                 }
             } else {
                 self.gyro_proc.reset();
@@ -794,7 +800,9 @@ test "dt_ms propagation: stick mouse output scales with dt" {
     for (0..4) |_| {
         const ev = try m4.apply(.{ .rx = 10000 }, 4);
         for (ev.aux.slice()) |e| switch (e) {
-            .rel => |r| if (r.code == 0) { total4 += r.value; },
+            .rel => |r| if (r.code == 0) {
+                total4 += r.value;
+            },
             else => {},
         };
     }
@@ -802,7 +810,9 @@ test "dt_ms propagation: stick mouse output scales with dt" {
     var total16: i32 = 0;
     const ev16 = try m16.apply(.{ .rx = 10000 }, 16);
     for (ev16.aux.slice()) |e| switch (e) {
-        .rel => |r| if (r.code == 0) { total16 += r.value; },
+        .rel => |r| if (r.code == 0) {
+            total16 += r.value;
+        },
         else => {},
     };
 

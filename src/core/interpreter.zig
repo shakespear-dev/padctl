@@ -155,7 +155,9 @@ fn applyTransformChain(initial: i64, chain: []const u8, type_str: []const u8) i6
     while (pos < chain.len) : (pos += 1) {
         switch (chain[pos]) {
             '(' => depth += 1,
-            ')' => if (depth > 0) { depth -= 1; },
+            ')' => if (depth > 0) {
+                depth -= 1;
+            },
             ',' => if (depth == 0) {
                 val = applyTransform(val, std.mem.trim(u8, chain[seg_start..pos], " \t"), type_str);
                 seg_start = pos + 1;
@@ -686,12 +688,12 @@ fn makeDualSenseSample() [64]u8 {
     // byte 8: bit4=Square(X), bit5=Cross(A)
     raw[8] = 0x30;
     // gyro at offset 16-21
-    std.mem.writeInt(i16, raw[16..18], 512, .little);  // gyro_x
+    std.mem.writeInt(i16, raw[16..18], 512, .little); // gyro_x
     std.mem.writeInt(i16, raw[18..20], -512, .little); // gyro_y
-    std.mem.writeInt(i16, raw[20..22], 256, .little);  // gyro_z
+    std.mem.writeInt(i16, raw[20..22], 256, .little); // gyro_z
     // accel at offset 22-27
     std.mem.writeInt(i16, raw[22..24], 8192, .little); // accel_x (~1g)
-    std.mem.writeInt(i16, raw[24..26], 0, .little);    // accel_y
+    std.mem.writeInt(i16, raw[24..26], 0, .little); // accel_y
     std.mem.writeInt(i16, raw[26..28], -8192, .little); // accel_z
     return raw;
 }
