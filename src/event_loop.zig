@@ -68,9 +68,12 @@ fn i64ToParamValue(v: ?i64) u16 {
     return @intCast((raw & 0xff) << 8);
 }
 
+const AdaptiveTriggerParamConfig = @import("config/mapping.zig").AdaptiveTriggerParamConfig;
+const empty_at_params = AdaptiveTriggerParamConfig{};
+
 fn buildAdaptiveTriggerParams(buf: *[12]Param, at: *const AdaptiveTriggerConfig) []const Param {
-    const r = at.right orelse .{};
-    const l = at.left orelse .{};
+    const r = at.right orelse empty_at_params;
+    const l = at.left orelse empty_at_params;
     buf[0] = .{ .name = "r_position", .value = i64ToParamValue(r.position) };
     buf[1] = .{ .name = "r_strength", .value = i64ToParamValue(r.strength) };
     buf[2] = .{ .name = "r_start", .value = i64ToParamValue(r.start) };
@@ -539,7 +542,6 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     // Arm for 20ms, then run the loop
     try armTimer(loop.timer_fd, 20);
 
-    const mapping_mod = @import("config/mapping.zig");
     const mapper_empty = try mapping_mod.parseString(allocator,
         \\[[layer]]
         \\name = "aim"
