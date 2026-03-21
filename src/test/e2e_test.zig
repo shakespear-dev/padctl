@@ -87,7 +87,7 @@ test "Vader5 IF1: axes, button A, lt" {
 
 test "Vader5 IF1: load from file and process" {
     const allocator = testing.allocator;
-    const parsed = try device_mod.parseFile(allocator, "devices/flydigi-vader5.toml");
+    const parsed = try device_mod.parseFile(allocator, "devices/flydigi/vader5.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
 

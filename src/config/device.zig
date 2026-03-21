@@ -310,9 +310,9 @@ test "load test-vader5.toml succeeds" {
     try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
 }
 
-test "load flydigi-vader5.toml succeeds" {
+test "load flydigi/vader5.toml succeeds" {
     const allocator = std.testing.allocator;
-    const result = try parseFile(allocator, "devices/flydigi-vader5.toml");
+    const result = try parseFile(allocator, "devices/flydigi/vader5.toml");
     defer result.deinit();
 
     const cfg = result.value;
@@ -408,9 +408,9 @@ test "unknown button name returns error" {
     try std.testing.expectError(error.InvalidConfig, parseString(allocator, bad));
 }
 
-test "load devices/dualsense.toml succeeds" {
+test "load devices/sony/dualsense.toml succeeds" {
     const allocator = std.testing.allocator;
-    const result = try parseFile(allocator, "devices/dualsense.toml");
+    const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
 
     const cfg = result.value;
@@ -423,7 +423,7 @@ test "load devices/dualsense.toml succeeds" {
 
 test "dualsense.toml report field count" {
     const allocator = std.testing.allocator;
-    const result = try parseFile(allocator, "devices/dualsense.toml");
+    const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
 
     const cfg = result.value;
@@ -436,7 +436,7 @@ test "dualsense.toml report field count" {
 
 test "dualsense.toml commands count" {
     const allocator = std.testing.allocator;
-    const result = try parseFile(allocator, "devices/dualsense.toml");
+    const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
 
     const cfg = result.value;
@@ -447,7 +447,7 @@ test "dualsense.toml commands count" {
 
 test "dualsense.toml output axes and buttons count" {
     const allocator = std.testing.allocator;
-    const result = try parseFile(allocator, "devices/dualsense.toml");
+    const result = try parseFile(allocator, "devices/sony/dualsense.toml");
     defer result.deinit();
 
     const cfg = result.value;

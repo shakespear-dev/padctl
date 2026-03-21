@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub const tools = struct {
+    pub const validate = @import("tools/validate.zig");
+};
+
 pub const core = struct {
     pub const state = @import("core/state.zig");
     pub const interpreter = @import("core/interpreter.zig");
@@ -56,10 +60,15 @@ const DeviceIO = io.device_io.DeviceIO;
 const VERSION = "0.1.0";
 
 const Cli = struct {
+    allocator: std.mem.Allocator,
     config_path: ?[]const u8 = null,
     config_dir: ?[]const u8 = null,
     mapping_path: ?[]const u8 = null,
-    validate_path: ?[]const u8 = null,
+    validate_files: std.ArrayList([]const u8) = .{},
+
+    fn deinit(self: *Cli) void {
+        self.validate_files.deinit(self.allocator);
+    }
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
@@ -67,8 +76,14 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
     defer args.deinit();
     _ = args.next(); // skip argv[0]
 
-    var cli = Cli{};
+    var cli = Cli{ .allocator = allocator };
+    var in_validate = false;
     while (args.next()) |arg| {
+        if (in_validate and !std.mem.startsWith(u8, arg, "--")) {
+            try cli.validate_files.append(allocator, arg);
+            continue;
+        }
+        in_validate = false;
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             std.process.exit(0);
@@ -82,7 +97,9 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
         } else if (std.mem.eql(u8, arg, "--mapping")) {
             cli.mapping_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--validate")) {
-            cli.validate_path = args.next() orelse return error.MissingArgValue;
+            in_validate = true;
+            const first = args.next() orelse return error.MissingArgValue;
+            try cli.validate_files.append(allocator, first);
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -112,19 +129,40 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const cli = parseArgs(allocator) catch |err| {
+    var cli = parseArgs(allocator) catch |err| {
         std.log.err("argument error: {}", .{err});
         printHelp();
         std.process.exit(1);
     };
+    defer cli.deinit();
 
-    // --validate mode: parse config and exit
-    if (cli.validate_path) |path| {
-        const result = config.device.parseFile(allocator, path) catch |err| {
-            std.log.err("invalid config: {}", .{err});
-            std.process.exit(1);
-        };
-        result.deinit();
+    // --validate mode: validate one or more files and exit
+    // Exit 0 = all valid, 1 = validation errors, 2 = file not found / parse error
+    if (cli.validate_files.items.len > 0) {
+        var any_error = false;
+        var any_parse_fail = false;
+        for (cli.validate_files.items) |path| {
+            const errors = tools.validate.validateFile(path, allocator) catch |err| {
+                std.log.err("{s}: {}", .{ path, err });
+                any_parse_fail = true;
+                continue;
+            };
+            defer tools.validate.freeErrors(errors, allocator);
+            for (errors) |e| {
+                std.log.err("{s}: {s}", .{ e.file, e.message });
+                if (std.mem.indexOf(u8, e.message, "parse/schema error") != null) {
+                    any_parse_fail = true;
+                } else {
+                    any_error = true;
+                }
+            }
+            if (errors.len == 0) {
+                _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch 0;
+                _ = std.posix.write(std.posix.STDOUT_FILENO, ": OK\n") catch 0;
+            }
+        }
+        if (any_parse_fail) std.process.exit(2);
+        if (any_error) std.process.exit(1);
         std.process.exit(0);
     }
 

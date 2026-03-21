@@ -1,0 +1,71 @@
+[device]
+name = "Nintendo Switch Pro Controller"
+vid = 0x057e
+pid = 0x2009
+
+[[device.interface]]
+id = 0
+class = "hid"
+
+# --- Bluetooth standard input (Report ID 0x30, 49 bytes) ---
+# Full input report; sent at ~60 Hz over BT HID.
+[[report]]
+name = "bt_standard"
+interface = 0
+size = 49
+
+[report.match]
+offset = 0
+expect = [0x30]
+
+[report.fields]
+# Sticks: 12-bit values packed in 3 bytes each.
+# Left stick: bytes 6-8, right stick: bytes 9-11.
+# Each stick packs two 12-bit values: byte[0] | (byte[1] & 0x0F) << 8 = X
+# Phase 2 cross-byte extraction; raw LSB bytes declared here.
+left_x_raw  = { offset = 6,  type = "u8" }
+left_y_raw  = { offset = 7,  type = "u8" }
+right_x_raw = { offset = 9,  type = "u8" }
+right_y_raw = { offset = 10, type = "u8" }
+# Triggers: u8 in bytes 4-5 of standard input (timer/conn info omitted)
+# Actual analog trigger values come from sub-command 0x10 calibration data.
+# For digital use, trigger state is in button bytes below.
+
+[report.button_group]
+# Bytes 3-5: right buttons, misc, left buttons
+# byte 3 bits: Y=0 X=1 B=2 A=3 SR_right=4 SL_right=5 R=6 ZR=7
+# byte 4 bits: Minus=0 Plus=1 RS=2 LS=3 Home=4 Capture=5
+# byte 5 bits: DDown=0 DUp=1 DRight=2 DLeft=3 SR_left=4 SL_left=5 L=6 ZL=7
+source = { offset = 3, size = 3 }
+map = { Y = 0, X = 1, B = 2, A = 3, RB = 6, RT = 7, Select = 8, Start = 9, RS = 10, LS = 11, Home = 12, Capture = 13, DPadDown = 16, DPadUp = 17, DPadRight = 18, DPadLeft = 19, LB = 22, LT = 23 }
+
+# --- Output device ---
+[output]
+name = "Nintendo Switch Pro Controller"
+vid = 0x057e
+pid = 0x2009
+
+[output.axes]
+left_x_raw  = { code = "ABS_X",  min = 0, max = 255 }
+left_y_raw  = { code = "ABS_Y",  min = 0, max = 255 }
+right_x_raw = { code = "ABS_RX", min = 0, max = 255 }
+right_y_raw = { code = "ABS_RY", min = 0, max = 255 }
+
+[output.buttons]
+A        = "BTN_EAST"
+B        = "BTN_SOUTH"
+X        = "BTN_NORTH"
+Y        = "BTN_WEST"
+LB       = "BTN_TL"
+RB       = "BTN_TR"
+LT       = "BTN_TL2"
+RT       = "BTN_TR2"
+Select   = "BTN_SELECT"
+Start    = "BTN_START"
+Home     = "BTN_MODE"
+Capture  = "BTN_MISC"
+LS       = "BTN_THUMBL"
+RS       = "BTN_THUMBR"
+
+[output.dpad]
+type = "hat"

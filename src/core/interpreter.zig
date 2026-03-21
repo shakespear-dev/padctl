@@ -698,7 +698,7 @@ fn makeDualSenseSample() [64]u8 {
 
 test "DualSense USB report: axes, triggers, IMU, buttons" {
     const allocator = testing.allocator;
-    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     const raw = makeDualSenseSample();
@@ -731,7 +731,7 @@ test "DualSense USB report: axes, triggers, IMU, buttons" {
 
 test "DualSense right_y=0x00 wraps to -32768 via @truncate" {
     const allocator = testing.allocator;
-    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     var raw = [_]u8{0} ** 64;
@@ -743,7 +743,7 @@ test "DualSense right_y=0x00 wraps to -32768 via @truncate" {
 
 test "DualSense joystick boundary values" {
     const allocator = testing.allocator;
-    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
 
@@ -767,7 +767,7 @@ test "DualSense joystick boundary values" {
 
 test "DualSense L1+R1 simultaneously pressed" {
     const allocator = testing.allocator;
-    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     var raw = [_]u8{0} ** 64;
@@ -784,7 +784,7 @@ test "DualSense L1+R1 simultaneously pressed" {
 
 test "DualSense all buttons released" {
     const allocator = testing.allocator;
-    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     var raw = [_]u8{0} ** 64;
@@ -797,7 +797,7 @@ test "DualSense all buttons released" {
 
 test "DualSense battery and touchpad fields parse without error" {
     const allocator = testing.allocator;
-    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/dualsense.toml");
+    const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     var raw = [_]u8{0} ** 64;
