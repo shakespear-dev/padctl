@@ -599,13 +599,11 @@ test "T5: empty device name parses and validates without error" {
     try std.testing.expectEqualStrings("", result.value.device.name);
 }
 
-test "fuzz parseString" {
-    var rng = std.Random.DefaultPrng.init(0xDEADBEEF);
-    var buf: [512]u8 = undefined;
-    for (0..5000) |_| {
-        const len = rng.random().intRangeAtMost(usize, 0, 512);
-        rng.random().bytes(buf[0..len]);
-        const result = parseString(std.testing.allocator, buf[0..len]);
-        if (result) |r| r.deinit() else |_| {}
-    }
+test "fuzz parseString: no panic on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) !void {
+            const result = parseString(std.testing.allocator, input);
+            if (result) |r| r.deinit() else |_| {}
+        }
+    }.run, .{});
 }
