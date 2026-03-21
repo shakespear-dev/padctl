@@ -845,6 +845,90 @@ test "T4: no commands.rumble — silent skip" {
     try testing.expectEqual(@as(usize, 0), mock_dev.write_log.items.len);
 }
 
+const custom_ff_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[output.force_feedback]
+    \\type = "custom_ff"
+    \\max_effects = 16
+    \\[commands.rumble]
+    \\interface = 0
+    \\template = "ff ff ff ff"
+    \\[commands.custom_ff]
+    \\interface = 0
+    \\template = "aa {strong:u8} {weak:u8} bb"
+;
+
+test "T10: config-driven FF command key — output.force_feedback.type overrides default rumble" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, custom_ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    var ff_out = MockFfOutput{
+        .allocator = allocator,
+        .ff_event = .{ .effect_type = 0x50, .strong = 0x8000, .weak = 0x4000 },
+    };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutput,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(20 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // custom_ff template: "aa {strong:u8} {weak:u8} bb"
+    // strong=0x8000 >> 8 = 0x80, weak=0x4000 >> 8 = 0x40
+    // Must NOT match "ff ff ff ff" (the rumble template)
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0x80, 0x40, 0xbb }, mock_dev.write_log.items);
+}
+
 // --- T8/T9: Adaptive trigger tests ---
 
 const command = @import("core/command.zig");
