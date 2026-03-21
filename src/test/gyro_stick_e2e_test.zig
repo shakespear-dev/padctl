@@ -349,9 +349,9 @@ const MockFfOutput = struct {
         .close = mockClose,
     };
 
-    fn mockEmit(_: *anyopaque, _: state_mod.GamepadState) anyerror!void {}
+    fn mockEmit(_: *anyopaque, _: state_mod.GamepadState) uinput.EmitError!void {}
 
-    fn mockPollFf(ptr: *anyopaque) anyerror!?FfEvent {
+    fn mockPollFf(ptr: *anyopaque) uinput.PollFfError!?FfEvent {
         const self: *MockFfOutput = @ptrCast(@alignCast(ptr));
         if (self.call_count == 0) {
             self.call_count += 1;

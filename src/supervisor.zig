@@ -132,11 +132,9 @@ pub const Supervisor = struct {
     }
 
     pub fn initForTest(allocator: std.mem.Allocator) !Supervisor {
-        const EFD_CLOEXEC: u32 = 0o2000000;
-        const EFD_NONBLOCK: u32 = 0o4000;
-        const stop_fd = try posix.eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        const stop_fd = try posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK);
         errdefer posix.close(stop_fd);
-        const hup_fd = try posix.eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        const hup_fd = try posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK);
         errdefer posix.close(hup_fd);
         return .{
             .allocator = allocator,
