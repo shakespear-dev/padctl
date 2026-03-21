@@ -160,7 +160,7 @@ steps:
 `contrib/aur/PKGBUILD`:
 - `arch=('x86_64' 'aarch64')`
 - `makedepends=('zig')`
-- Installs binary, `padctl@.service`, `80-padctl.rules`, `devices/` into standard FHS paths.
+- Installs binary, `padctl@.service`, `99-padctl.rules`, `devices/` into standard FHS paths.
 
 `contrib/aur/padctl-bin/PKGBUILD`:
 - Fetches prebuilt tarball from GitHub Release for the current arch.
@@ -271,6 +271,7 @@ pub const OutputCapabilities = struct {
 };
 
 pub const OutputConfig = struct {
+    emulate:      ?[]const u8 = null,   // preset name; resolved before vid/pid/name are used
     vid:          ?u16 = null,
     pid:          ?u16 = null,
     name:         ?[]const u8 = null,

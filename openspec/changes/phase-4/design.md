@@ -163,9 +163,18 @@ process_report = true    # optional; default false
 
 ### Output DSL Emulate Extension
 
-`src/output.zig` gains emulate fields read from `[output]` section:
+`src/output.zig` gains emulate fields read from `[output]` section.
+
+**Method A — `emulate` preset (shorthand)**: Declaring `emulate = "<preset>"` auto-fills `vid`, `pid`, `name`, and standard capabilities for that preset. Built-in presets: `dualsense`, `xbox-elite2`, `switch-pro`. Unknown preset → config load error.
+
+**Method B — explicit fields**: Specify `vid`/`pid`/`name` and `[output.capabilities]` directly.
 
 ```toml
+# Method A
+[output]
+emulate = "xbox-elite2"
+
+# Method B (equivalent result)
 [output]
 vid  = 0x054c
 pid  = 0x0ce6
@@ -177,7 +186,7 @@ buttons = ["BTN_SOUTH", "BTN_EAST", "BTN_NORTH", "BTN_WEST"]
 rumble  = true
 ```
 
-When `[output]` is present, uinput device creation uses the declared VID/PID/name instead of defaults. When `[output.capabilities]` is present, its axis and button lists replace the inferred capabilities. Absent `[output]` → behaviour identical to pre-Phase-4 (regression-safe).
+When `[output]` is present, uinput device creation uses the declared (or preset-resolved) VID/PID/name instead of defaults. When `[output.capabilities]` is present, its axis and button lists replace the inferred capabilities. Absent `[output]` → behaviour identical to pre-Phase-4 (regression-safe).
 
 ### Packaging
 
@@ -197,7 +206,7 @@ Includes `devices/`, `contrib/`, and `sdk/plugin.h` in the tarball.
 #### AUR PKGBUILD (`contrib/aur/PKGBUILD`)
 
 - `makedepends=('zig')`, no runtime deps.
-- `package()` installs: `padctl` binary + `padctl@.service` + `80-padctl.rules` + `devices/`.
+- `package()` installs: `padctl` binary + `padctl@.service` + `99-padctl.rules` + `devices/`.
 - `padctl-bin/PKGBUILD` fetches prebuilt binary from Release tarball, skips compile step.
 
 #### Nix flake (`flake.nix`)
