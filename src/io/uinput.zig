@@ -15,6 +15,7 @@ const UI_SET_KEYBIT = ioctl_constants.UI_SET_KEYBIT;
 const UI_SET_RELBIT = ioctl_constants.UI_SET_RELBIT;
 const UI_SET_ABSBIT = ioctl_constants.UI_SET_ABSBIT;
 const UI_SET_FFBIT = ioctl_constants.UI_SET_FFBIT;
+const UI_SET_PROPBIT = ioctl_constants.UI_SET_PROPBIT;
 const UI_DEV_SETUP = ioctl_constants.UI_DEV_SETUP;
 const UI_ABS_SETUP = ioctl_constants.UI_ABS_SETUP;
 const UI_DEV_CREATE = ioctl_constants.UI_DEV_CREATE;
@@ -469,6 +470,179 @@ pub const AuxDevice = struct {
     }
 
     pub fn close(self: *AuxDevice) void {
+        _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
+        std.posix.close(self.fd);
+    }
+};
+
+pub const TouchpadOutputDevice = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        emit_touch: *const fn (ptr: *anyopaque, s: state.GamepadState) anyerror!void,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn emitTouch(self: TouchpadOutputDevice, s: state.GamepadState) !void {
+        return self.vtable.emit_touch(self.ptr, s);
+    }
+
+    pub fn close(self: TouchpadOutputDevice) void {
+        self.vtable.close(self.ptr);
+    }
+};
+
+pub const TouchpadDevice = struct {
+    fd: std.posix.fd_t,
+    prev_slots: [MAX_TOUCH_SLOTS]TouchSlot = [_]TouchSlot{.{}} ** MAX_TOUCH_SLOTS,
+    max_slots: u8,
+    next_tracking_id: i32 = 0,
+    prev_btn_touch: bool = false,
+
+    const MAX_TOUCH_SLOTS = 4;
+    const TouchSlot = struct {
+        x: i32 = 0,
+        y: i32 = 0,
+        active: bool = false,
+    };
+
+    pub fn create(cfg: *const device.TouchpadConfig) !TouchpadDevice {
+        const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
+        const fd = try std.posix.open("/dev/uinput", flags, 0);
+        errdefer std.posix.close(fd);
+
+        try ioctlInt(fd, UI_SET_EVBIT, c.EV_ABS);
+        try ioctlInt(fd, UI_SET_EVBIT, c.EV_KEY);
+
+        try ioctlInt(fd, UI_SET_ABSBIT, c.ABS_MT_SLOT);
+        try ioctlInt(fd, UI_SET_ABSBIT, c.ABS_MT_TRACKING_ID);
+        try ioctlInt(fd, UI_SET_ABSBIT, c.ABS_MT_POSITION_X);
+        try ioctlInt(fd, UI_SET_ABSBIT, c.ABS_MT_POSITION_Y);
+        try ioctlInt(fd, UI_SET_KEYBIT, c.BTN_TOUCH);
+        try ioctlInt(fd, UI_SET_PROPBIT, c.INPUT_PROP_POINTER);
+
+        const max_slots: u8 = if (cfg.max_slots) |ms| @intCast(ms) else 2;
+
+        // ABS_MT_SLOT
+        {
+            var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+            abs_setup.code = c.ABS_MT_SLOT;
+            abs_setup.absinfo.minimum = 0;
+            abs_setup.absinfo.maximum = @as(i32, max_slots) - 1;
+            try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+        }
+        // ABS_MT_TRACKING_ID
+        {
+            var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+            abs_setup.code = c.ABS_MT_TRACKING_ID;
+            abs_setup.absinfo.minimum = 0;
+            abs_setup.absinfo.maximum = 65535;
+            try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+        }
+        // ABS_MT_POSITION_X
+        {
+            var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+            abs_setup.code = c.ABS_MT_POSITION_X;
+            abs_setup.absinfo.minimum = @intCast(cfg.x_min);
+            abs_setup.absinfo.maximum = @intCast(cfg.x_max);
+            try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+        }
+        // ABS_MT_POSITION_Y
+        {
+            var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+            abs_setup.code = c.ABS_MT_POSITION_Y;
+            abs_setup.absinfo.minimum = @intCast(cfg.y_min);
+            abs_setup.absinfo.maximum = @intCast(cfg.y_max);
+            try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+        }
+
+        var setup = std.mem.zeroes(c.uinput_setup);
+        const name = cfg.name orelse "padctl-touchpad";
+        const copy_len = @min(name.len, setup.name.len - 1);
+        @memcpy(setup.name[0..copy_len], name[0..copy_len]);
+        setup.id.bustype = c.BUS_VIRTUAL;
+        try ioctlPtr(fd, UI_DEV_SETUP, @intFromPtr(&setup));
+        try ioctlPtr(fd, UI_DEV_CREATE, 0);
+
+        return .{ .fd = fd, .max_slots = max_slots };
+    }
+
+    pub fn emit(self: *TouchpadDevice, s: state.GamepadState) !void {
+        const slots = [2]TouchSlot{
+            .{ .x = s.touch0_x, .y = s.touch0_y, .active = s.touch0_active },
+            .{ .x = s.touch1_x, .y = s.touch1_y, .active = s.touch1_active },
+        };
+
+        var events: [32]c.input_event = undefined;
+        var n: usize = 0;
+        const active_slots: usize = @min(@as(usize, self.max_slots), 2);
+
+        for (0..active_slots) |i| {
+            const curr = slots[i];
+            const prev = self.prev_slots[i];
+            if (curr.active == prev.active and curr.x == prev.x and curr.y == prev.y) continue;
+
+            events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_SLOT, .value = @intCast(i), .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+
+            if (curr.active and !prev.active) {
+                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_TRACKING_ID, .value = self.next_tracking_id, .time = std.mem.zeroes(c.timeval) };
+                n += 1;
+                self.next_tracking_id +%= 1;
+            } else if (!curr.active and prev.active) {
+                events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_TRACKING_ID, .value = -1, .time = std.mem.zeroes(c.timeval) };
+                n += 1;
+            }
+
+            if (curr.active) {
+                if (curr.x != prev.x or !prev.active) {
+                    events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_POSITION_X, .value = curr.x, .time = std.mem.zeroes(c.timeval) };
+                    n += 1;
+                }
+                if (curr.y != prev.y or !prev.active) {
+                    events[n] = .{ .type = c.EV_ABS, .code = c.ABS_MT_POSITION_Y, .value = curr.y, .time = std.mem.zeroes(c.timeval) };
+                    n += 1;
+                }
+            }
+
+            self.prev_slots[i] = curr;
+        }
+
+        const any_active = slots[0].active or (active_slots > 1 and slots[1].active);
+        if (any_active != self.prev_btn_touch) {
+            events[n] = .{ .type = c.EV_KEY, .code = c.BTN_TOUCH, .value = if (any_active) @as(i32, 1) else 0, .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+            self.prev_btn_touch = any_active;
+        }
+
+        if (n > 0) {
+            events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+        }
+    }
+
+    pub fn touchpadOutputDevice(self: *TouchpadDevice) TouchpadOutputDevice {
+        return .{ .ptr = self, .vtable = &tp_vtable };
+    }
+
+    const tp_vtable = TouchpadOutputDevice.VTable{
+        .emit_touch = emitTouchVtable,
+        .close = closeTouchVtable,
+    };
+
+    fn emitTouchVtable(ptr: *anyopaque, s: state.GamepadState) anyerror!void {
+        const self: *TouchpadDevice = @ptrCast(@alignCast(ptr));
+        return self.emit(s);
+    }
+
+    fn closeTouchVtable(ptr: *anyopaque) void {
+        const self: *TouchpadDevice = @ptrCast(@alignCast(ptr));
+        self.close();
+    }
+
+    pub fn close(self: *TouchpadDevice) void {
         _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
         std.posix.close(self.fd);
     }

@@ -45,6 +45,12 @@ pub const GamepadState = struct {
     accel_x: i16 = 0,
     accel_y: i16 = 0,
     accel_z: i16 = 0,
+    touch0_x: i16 = 0,
+    touch0_y: i16 = 0,
+    touch1_x: i16 = 0,
+    touch1_y: i16 = 0,
+    touch0_active: bool = false,
+    touch1_active: bool = false,
 
     pub fn diff(self: GamepadState, prev: GamepadState) GamepadStateDelta {
         var d = GamepadStateDelta{};
@@ -63,6 +69,12 @@ pub const GamepadState = struct {
         if (self.accel_x != prev.accel_x) d.accel_x = self.accel_x;
         if (self.accel_y != prev.accel_y) d.accel_y = self.accel_y;
         if (self.accel_z != prev.accel_z) d.accel_z = self.accel_z;
+        if (self.touch0_x != prev.touch0_x) d.touch0_x = self.touch0_x;
+        if (self.touch0_y != prev.touch0_y) d.touch0_y = self.touch0_y;
+        if (self.touch1_x != prev.touch1_x) d.touch1_x = self.touch1_x;
+        if (self.touch1_y != prev.touch1_y) d.touch1_y = self.touch1_y;
+        if (self.touch0_active != prev.touch0_active) d.touch0_active = self.touch0_active;
+        if (self.touch1_active != prev.touch1_active) d.touch1_active = self.touch1_active;
         return d;
     }
 
@@ -82,6 +94,12 @@ pub const GamepadState = struct {
         if (delta.accel_x) |v| self.accel_x = v;
         if (delta.accel_y) |v| self.accel_y = v;
         if (delta.accel_z) |v| self.accel_z = v;
+        if (delta.touch0_x) |v| self.touch0_x = v;
+        if (delta.touch0_y) |v| self.touch0_y = v;
+        if (delta.touch1_x) |v| self.touch1_x = v;
+        if (delta.touch1_y) |v| self.touch1_y = v;
+        if (delta.touch0_active) |v| self.touch0_active = v;
+        if (delta.touch1_active) |v| self.touch1_active = v;
     }
 };
 
@@ -103,6 +121,12 @@ pub const GamepadStateDelta = struct {
     accel_x: ?i16 = null,
     accel_y: ?i16 = null,
     accel_z: ?i16 = null,
+    touch0_x: ?i16 = null,
+    touch0_y: ?i16 = null,
+    touch1_x: ?i16 = null,
+    touch1_y: ?i16 = null,
+    touch0_active: ?bool = null,
+    touch1_active: ?bool = null,
 };
 
 // --- tests ---
@@ -170,4 +194,24 @@ test "diff: changed fields appear in delta" {
     try std.testing.expectEqual(@as(?i16, 50), d.ax);
     try std.testing.expectEqual(@as(?i16, null), d.ay); // unchanged
     try std.testing.expectEqual(@as(?u8, 128), d.lt);
+}
+
+test "applyDelta: touchpad fields" {
+    var s = GamepadState{};
+    s.applyDelta(.{ .touch0_x = 1000, .touch0_y = -500, .touch0_active = true });
+    try std.testing.expectEqual(@as(i16, 1000), s.touch0_x);
+    try std.testing.expectEqual(@as(i16, -500), s.touch0_y);
+    try std.testing.expectEqual(true, s.touch0_active);
+    try std.testing.expectEqual(@as(i16, 0), s.touch1_x);
+    try std.testing.expectEqual(false, s.touch1_active);
+}
+
+test "diff: touchpad fields appear in delta" {
+    const prev = GamepadState{};
+    const curr = GamepadState{ .touch0_x = 100, .touch1_active = true };
+    const d = curr.diff(prev);
+    try std.testing.expectEqual(@as(?i16, 100), d.touch0_x);
+    try std.testing.expectEqual(@as(?bool, true), d.touch1_active);
+    try std.testing.expectEqual(@as(?i16, null), d.touch0_y);
+    try std.testing.expectEqual(@as(?bool, null), d.touch0_active);
 }

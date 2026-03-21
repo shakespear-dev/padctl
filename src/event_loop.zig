@@ -54,6 +54,7 @@ pub const EventLoopContext = struct {
     output: @import("io/uinput.zig").OutputDevice,
     mapper: ?*mapper_mod.Mapper = null,
     aux_output: ?@import("io/uinput.zig").AuxOutputDevice = null,
+    touchpad_output: ?@import("io/uinput.zig").TouchpadOutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
     poll_timeout_ms: ?u32 = null,
@@ -270,12 +271,14 @@ pub const EventLoop = struct {
                             };
                             self.gamepad_state.applyDelta(delta);
                             try ctx.output.emit(events.gamepad);
+                            if (ctx.touchpad_output) |tp| try tp.emitTouch(events.gamepad);
                             if (ctx.aux_output) |ao| {
                                 if (events.aux.len > 0) try ao.emitAux(events.aux.slice());
                             }
                         } else {
                             self.gamepad_state.applyDelta(delta);
                             try ctx.output.emit(self.gamepad_state);
+                            if (ctx.touchpad_output) |tp| try tp.emitTouch(self.gamepad_state);
                         }
                     }
                 }

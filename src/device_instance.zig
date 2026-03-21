@@ -6,8 +6,10 @@ const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const UsbrawDevice = @import("io/usbraw.zig").UsbrawDevice;
 const UinputDevice = @import("io/uinput.zig").UinputDevice;
 const AuxDevice = @import("io/uinput.zig").AuxDevice;
+const TouchpadDevice = @import("io/uinput.zig").TouchpadDevice;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
 const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
+const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
 const Mapper = @import("core/mapper.zig").Mapper;
@@ -73,6 +75,7 @@ pub const DeviceInstance = struct {
     mapper: ?Mapper,
     uinput_dev: ?UinputDevice,
     aux_dev: ?AuxDevice,
+    touchpad_dev: ?TouchpadDevice,
     device_cfg: *const DeviceConfig,
     pending_mapping: ?*MappingConfig,
     stopped: bool,
@@ -109,6 +112,7 @@ pub const DeviceInstance = struct {
 
         var uinput_dev: ?UinputDevice = null;
         var aux_dev: ?AuxDevice = null;
+        var touchpad_dev: ?TouchpadDevice = null;
 
         if (cfg.output) |*out_cfg| {
             uinput_dev = try UinputDevice.create(out_cfg);
@@ -118,6 +122,9 @@ pub const DeviceInstance = struct {
             }
             if (out_cfg.aux != null) {
                 aux_dev = try AuxDevice.create(&.{});
+            }
+            if (out_cfg.touchpad) |*tp_cfg| {
+                touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
         }
 
@@ -129,6 +136,7 @@ pub const DeviceInstance = struct {
             .mapper = null,
             .uinput_dev = uinput_dev,
             .aux_dev = aux_dev,
+            .touchpad_dev = touchpad_dev,
             .device_cfg = cfg,
             .pending_mapping = null,
             .stopped = false,
@@ -139,6 +147,7 @@ pub const DeviceInstance = struct {
         if (self.mapper) |*m| m.deinit();
         if (self.uinput_dev) |*u| u.close();
         if (self.aux_dev) |*a| a.close();
+        if (self.touchpad_dev) |*tp| tp.close();
         for (self.devices) |dev| dev.close();
         self.allocator.free(self.devices);
         self.loop.deinit();
@@ -162,6 +171,7 @@ pub const DeviceInstance = struct {
 
             const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
+            const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
             const mapper_ptr: ?*Mapper = if (self.mapper) |*m| m else null;
 
             try self.loop.run(.{
@@ -170,10 +180,12 @@ pub const DeviceInstance = struct {
                 .output = output,
                 .mapper = mapper_ptr,
                 .aux_output = aux_output,
+                .touchpad_output = touchpad_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
                 .poll_timeout_ms = self.poll_timeout_ms,
             });
+            if (self.loop.disconnected) break;
         }
     }
 

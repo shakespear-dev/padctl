@@ -101,6 +101,15 @@ pub const AuxConfig = struct {
     buttons: ?toml.HashMap([]const u8) = null,
 };
 
+pub const TouchpadConfig = struct {
+    name: ?[]const u8 = null,
+    x_min: i64 = 0,
+    x_max: i64 = 0,
+    y_min: i64 = 0,
+    y_max: i64 = 0,
+    max_slots: ?i64 = null,
+};
+
 pub const OutputConfig = struct {
     emulate: ?[]const u8 = null,
     name: ?[]const u8 = null,
@@ -111,6 +120,7 @@ pub const OutputConfig = struct {
     dpad: ?DpadOutputConfig = null,
     force_feedback: ?FfConfig = null,
     aux: ?AuxConfig = null,
+    touchpad: ?TouchpadConfig = null,
 };
 
 pub const WasmOverridesConfig = struct {

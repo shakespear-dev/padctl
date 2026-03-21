@@ -79,6 +79,12 @@ const FieldTag = enum {
     accel_x,
     accel_y,
     accel_z,
+    touch0_x,
+    touch0_y,
+    touch1_x,
+    touch1_y,
+    touch0_active,
+    touch1_active,
     unknown,
 };
 
@@ -95,6 +101,12 @@ fn parseFieldTag(name: []const u8) FieldTag {
     if (std.mem.eql(u8, name, "accel_x")) return .accel_x;
     if (std.mem.eql(u8, name, "accel_y")) return .accel_y;
     if (std.mem.eql(u8, name, "accel_z")) return .accel_z;
+    if (std.mem.eql(u8, name, "touch0_x")) return .touch0_x;
+    if (std.mem.eql(u8, name, "touch0_y")) return .touch0_y;
+    if (std.mem.eql(u8, name, "touch1_x")) return .touch1_x;
+    if (std.mem.eql(u8, name, "touch1_y")) return .touch1_y;
+    if (std.mem.eql(u8, name, "touch0_active")) return .touch0_active;
+    if (std.mem.eql(u8, name, "touch1_active")) return .touch1_active;
     return .unknown;
 }
 
@@ -112,6 +124,12 @@ fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
         .accel_x => delta.accel_x = @truncate(val),
         .accel_y => delta.accel_y = @truncate(val),
         .accel_z => delta.accel_z = @truncate(val),
+        .touch0_x => delta.touch0_x = @truncate(val),
+        .touch0_y => delta.touch0_y = @truncate(val),
+        .touch1_x => delta.touch1_x = @truncate(val),
+        .touch1_y => delta.touch1_y = @truncate(val),
+        .touch0_active => delta.touch0_active = val != 0,
+        .touch1_active => delta.touch1_active = val != 0,
         .unknown => {},
     }
 }
