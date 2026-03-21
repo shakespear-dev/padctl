@@ -37,7 +37,49 @@ jobs:
           tar czf "${ARCHIVE}" "${STAGING}"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
-      - name: Upload to Release
+      - name: Upload tarball
         run: gh release upload ${{ github.ref_name }} "${{ env.ARCHIVE }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload artifact for checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: sha256sum padctl-*.tar.gz > SHA256SUMS.txt
+
+      - name: Generate CHANGELOG.md
+        run: |
+          PREV=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
+          {
+            echo "# Changelog — ${{ github.ref_name }}"
+            echo
+            if [ -n "${PREV}" ]; then
+              git log --oneline "${PREV}..${{ github.ref_name }}"
+            else
+              git log --oneline "${{ github.ref_name }}"
+            fi
+          } > CHANGELOG.md
+
+      - name: Upload checksums and changelog
+        run: gh release upload ${{ github.ref_name }} SHA256SUMS.txt CHANGELOG.md --clobber
         env:
           GH_TOKEN: ${{ github.token }}
