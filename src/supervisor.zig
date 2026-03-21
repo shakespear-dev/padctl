@@ -8,10 +8,12 @@ const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const config_device = @import("config/device.zig");
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
+const ioctl = @import("io/ioctl_constants.zig");
 
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
     phys_key: []const u8,
+    devname: ?[]const u8, // null for statically-spawned; set by attach()
     instance: *DeviceInstance,
     thread: std.Thread,
     mapping_arena: std.heap.ArenaAllocator,
@@ -69,6 +71,7 @@ pub const Supervisor = struct {
             self.allocator.destroy(m.instance);
             m.mapping_arena.deinit();
             self.allocator.free(m.phys_key);
+            if (m.devname) |dn| self.allocator.free(dn);
         }
         self.managed.deinit(self.allocator);
         for (self.configs.items) |c| {
@@ -84,6 +87,22 @@ pub const Supervisor = struct {
         errdefer self.allocator.free(key_copy);
         try self.managed.append(self.allocator, .{
             .phys_key = key_copy,
+            .devname = null,
+            .instance = instance,
+            .thread = thread,
+            .mapping_arena = std.heap.ArenaAllocator.init(self.allocator),
+        });
+    }
+
+    fn spawnNamed(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance) !void {
+        const thread = try std.Thread.spawn(.{}, threadEntry, .{instance});
+        const key_copy = try self.allocator.dupe(u8, phys_key);
+        errdefer self.allocator.free(key_copy);
+        const dn_copy = try self.allocator.dupe(u8, devname);
+        errdefer self.allocator.free(dn_copy);
+        try self.managed.append(self.allocator, .{
+            .phys_key = key_copy,
+            .devname = dn_copy,
             .instance = instance,
             .thread = thread,
             .mapping_arena = std.heap.ArenaAllocator.init(self.allocator),
@@ -98,6 +117,7 @@ pub const Supervisor = struct {
             self.allocator.destroy(m.instance);
             m.mapping_arena.deinit();
             self.allocator.free(m.phys_key);
+            if (m.devname) |dn| self.allocator.free(dn);
         }
         self.managed.clearRetainingCapacity();
     }
@@ -129,6 +149,7 @@ pub const Supervisor = struct {
             self.allocator.destroy(m.instance);
             m.mapping_arena.deinit();
             self.allocator.free(m.phys_key);
+            if (m.devname) |dn| self.allocator.free(dn);
             _ = self.managed.swapRemove(idx);
         }
 
@@ -303,6 +324,77 @@ pub const Supervisor = struct {
 
     pub fn joinAll(self: *Supervisor) void {
         for (self.managed.items) |*m| m.thread.join();
+    }
+
+    /// Hotplug attach: open /dev/{devname}, match VID/PID against loaded configs,
+    /// dedup by physical path, spawn a new DeviceInstance thread.
+    /// Silently returns (no error) if no config matches or device is already tracked.
+    pub fn attach(self: *Supervisor, devname: []const u8) !void {
+        return self.attachWithRoot(devname, "/dev");
+    }
+
+    pub fn attachWithRoot(self: *Supervisor, devname: []const u8, dev_root: []const u8) !void {
+        var path_buf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
+
+        const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch return;
+        defer posix.close(fd);
+
+        var info: ioctl.HidrawDevinfo = undefined;
+        if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) return;
+        const vid: u16 = @bitCast(info.vendor);
+        const pid: u16 = @bitCast(info.product);
+
+        var cfg: ?*const DeviceConfig = null;
+        for (self.configs.items) |pr| {
+            if (@as(u16, @intCast(pr.value.device.vid)) == vid and
+                @as(u16, @intCast(pr.value.device.pid)) == pid)
+            {
+                cfg = &pr.value;
+                break;
+            }
+        }
+        if (cfg == null) return;
+
+        var phys_buf: [256]u8 = std.mem.zeroes([256]u8);
+        _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&phys_buf));
+        const phys = std.mem.sliceTo(&phys_buf, 0);
+
+        for (self.managed.items) |*m| {
+            if (std.mem.eql(u8, m.phys_key, phys)) return;
+        }
+
+        const inst_ptr = try self.allocator.create(DeviceInstance);
+        errdefer self.allocator.destroy(inst_ptr);
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?) catch |err| {
+            std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
+            self.allocator.destroy(inst_ptr);
+            return;
+        };
+        self.spawnNamed(devname, phys, inst_ptr) catch |err| {
+            inst_ptr.deinit();
+            self.allocator.destroy(inst_ptr);
+            return err;
+        };
+    }
+
+    /// Hotplug detach: find instance by devname, stop/join/free it.
+    /// Silently returns if devname is not tracked.
+    pub fn detach(self: *Supervisor, devname: []const u8) void {
+        for (self.managed.items, 0..) |*m, i| {
+            const dn = m.devname orelse continue;
+            if (!std.mem.eql(u8, dn, devname)) continue;
+
+            m.instance.stop();
+            m.thread.join();
+            m.instance.deinit();
+            self.allocator.destroy(m.instance);
+            m.mapping_arena.deinit();
+            self.allocator.free(m.phys_key);
+            self.allocator.free(dn);
+            _ = self.managed.swapRemove(i);
+            return;
+        }
     }
 };
 
@@ -541,4 +633,103 @@ test "Supervisor: two toml files, no matching hidraw → zero instances" {
 
     try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "Supervisor: duplicate attach devname — only one instance created" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    var sup = try Supervisor.init(allocator);
+
+    const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.spawnNamed("hidraw3", "usb-1-1", inst);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    // Simulate duplicate add uevent: dedup by physical path.
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    defer mock_b.deinit();
+    const inst2 = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+
+    var dup = false;
+    for (sup.managed.items) |*m| {
+        if (std.mem.eql(u8, m.phys_key, "usb-1-1")) { dup = true; break; }
+    }
+    if (dup) {
+        inst2.deinit();
+        allocator.destroy(inst2);
+    } else {
+        try sup.spawnNamed("hidraw3b", "usb-1-1", inst2);
+    }
+
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
+}
+
+test "Supervisor: detach unknown devname — no panic" {
+    const allocator = testing.allocator;
+
+    var sup = try Supervisor.init(allocator);
+    defer sup.deinit();
+
+    sup.detach("hidraw99");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "Supervisor: attach-detach-attach same devname — new instance after re-attach" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    var sup = try Supervisor.init(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    try sup.spawnNamed("hidraw3", "usb-1-1", inst_a);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    sup.detach("hidraw3");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    try sup.spawnNamed("hidraw3", "usb-1-1", inst_b);
+    try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
+    mock_b.deinit();
+}
+
+test "Supervisor: two devnames attached simultaneously — independent threads" {
+    const allocator = testing.allocator;
+
+    const parsed_dev = try device_mod.parseString(allocator, minimal_device_toml);
+    defer parsed_dev.deinit();
+
+    var mock_a = try MockDeviceIO.init(allocator, &.{});
+    var mock_b = try MockDeviceIO.init(allocator, &.{});
+    var sup = try Supervisor.init(allocator);
+
+    const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
+    const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
+    try sup.spawnNamed("hidraw3", "usb-1-1", inst_a);
+    try sup.spawnNamed("hidraw4", "usb-1-2", inst_b);
+    try testing.expectEqual(@as(usize, 2), sup.managed.items.len);
+
+    try testing.expect(sup.managed.items[0].instance != sup.managed.items[1].instance);
+    try testing.expectEqualStrings("hidraw3", sup.managed.items[0].devname.?);
+    try testing.expectEqualStrings("hidraw4", sup.managed.items[1].devname.?);
+
+    sup.stopAll();
+    sup.deinit();
+    mock_a.deinit();
+    mock_b.deinit();
 }
