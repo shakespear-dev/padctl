@@ -65,6 +65,8 @@ pub const GamepadState = struct {
     }
 };
 
+const std = @import("std");
+
 pub const GamepadStateDelta = struct {
     ax: ?i16 = null,
     ay: ?i16 = null,
@@ -82,3 +84,45 @@ pub const GamepadStateDelta = struct {
     accel_y: ?i16 = null,
     accel_z: ?i16 = null,
 };
+
+// --- tests ---
+
+test "applyDelta: null fields leave state unchanged" {
+    var s = GamepadState{ .ax = 10, .ay = 20, .buttons = 0xFF };
+    s.applyDelta(.{});
+    try std.testing.expectEqual(@as(i16, 10), s.ax);
+    try std.testing.expectEqual(@as(i16, 20), s.ay);
+    try std.testing.expectEqual(@as(u32, 0xFF), s.buttons);
+}
+
+test "applyDelta: full overwrite" {
+    var s = GamepadState{};
+    s.applyDelta(.{
+        .ax = 100, .ay = -100, .rx = 200, .ry = -200,
+        .lt = 128, .rt = 64,
+        .dpad_x = 1, .dpad_y = -1,
+        .buttons = 0xDEAD,
+        .gyro_x = 10, .gyro_y = 20, .gyro_z = 30,
+        .accel_x = -10, .accel_y = -20, .accel_z = -30,
+    });
+    try std.testing.expectEqual(@as(i16, 100), s.ax);
+    try std.testing.expectEqual(@as(i16, -100), s.ay);
+    try std.testing.expectEqual(@as(i16, 200), s.rx);
+    try std.testing.expectEqual(@as(i16, -200), s.ry);
+    try std.testing.expectEqual(@as(u8, 128), s.lt);
+    try std.testing.expectEqual(@as(u8, 64), s.rt);
+    try std.testing.expectEqual(@as(i8, 1), s.dpad_x);
+    try std.testing.expectEqual(@as(i8, -1), s.dpad_y);
+    try std.testing.expectEqual(@as(u32, 0xDEAD), s.buttons);
+    try std.testing.expectEqual(@as(i16, 10), s.gyro_x);
+    try std.testing.expectEqual(@as(i16, -30), s.accel_z);
+}
+
+test "applyDelta: partial overwrite leaves other fields unchanged" {
+    var s = GamepadState{ .ax = 5, .ay = 6, .rx = 7, .buttons = 0xF0 };
+    s.applyDelta(.{ .ax = 99, .buttons = 0x0F });
+    try std.testing.expectEqual(@as(i16, 99), s.ax);
+    try std.testing.expectEqual(@as(i16, 6), s.ay);   // unchanged
+    try std.testing.expectEqual(@as(i16, 7), s.rx);   // unchanged
+    try std.testing.expectEqual(@as(u32, 0x0F), s.buttons);
+}

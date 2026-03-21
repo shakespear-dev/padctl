@@ -851,3 +851,75 @@ test "button_group batch extraction" {
     try testing.expect(btns & (@as(u32, 1) << x_bit) != 0); // X pressed
     try testing.expect(btns & (@as(u32, 1) << y_bit) == 0); // Y not pressed
 }
+
+const crc32_base_toml =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 9
+    \\[report.match]
+    \\offset = 0
+    \\expect = [0xAA]
+    \\[report.checksum]
+    \\algo = "crc32"
+    \\range = [0, 4]
+    \\expect = { offset = 4, type = "u32le" }
+;
+
+test "checksum crc32 correct passes" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, crc32_base_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // CRC32-IsoHdlc([0xAA,0x01,0x02,0x03]) = 0xa96f7f72
+    var raw = [_]u8{0xAA, 0x01, 0x02, 0x03, 0x72, 0x7f, 0x6f, 0xa9, 0x00};
+    _ = try interp.processReport(0, &raw);
+}
+
+test "checksum crc32 mismatch returns error" {
+    const allocator = testing.allocator;
+    const parsed = try device.parseString(allocator, crc32_base_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // Store wrong crc
+    var raw = [_]u8{0xAA, 0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00};
+    try testing.expectError(ProcessError.ChecksumMismatch, interp.processReport(0, &raw));
+}
+
+test "checksum crc32 with seed" {
+    const allocator = testing.allocator;
+    const toml_str =
+        \\[device]
+        \\name = "T"
+        \\vid = 1
+        \\pid = 2
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\[[report]]
+        \\name = "r"
+        \\interface = 0
+        \\size = 9
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x01]
+        \\[report.checksum]
+        \\algo = "crc32"
+        \\range = [1, 4]
+        \\seed = 66
+        \\expect = { offset = 4, type = "u32le" }
+    ;
+    const parsed = try device.parseString(allocator, toml_str);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+    // seed=66=0x42 → CRC32(seed_byte=0x42, data=[0x01,0x02,0x03]) = 0xbaa416a5
+    var raw = [_]u8{0x01, 0x01, 0x02, 0x03, 0xa5, 0x16, 0xa4, 0xba, 0x00};
+    _ = try interp.processReport(0, &raw);
+}

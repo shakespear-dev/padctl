@@ -294,6 +294,23 @@ test "discoverAllWithRoot: nonexistent dev_root returns empty" {
     try std.testing.expectEqual(@as(usize, 0), paths.len);
 }
 
+test "parseInterfaceId: deep multi-segment path" {
+    try std.testing.expectEqual(@as(?u8, 3), parseInterfaceId("usb-0000:00:14.0-2.4/input3"));
+    try std.testing.expectEqual(@as(?u8, 0), parseInterfaceId("platform/soc/usb/input0"));
+}
+
+test "parseInterfaceId: bare 'input' without number returns null" {
+    try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("usb/input"));
+    try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("input"));
+}
+
+test "parseInterfaceId: finds last 'inputN' even when trailing segment is non-input" {
+    // "event0" is not an input* segment; walk finds "input5" → 5
+    try std.testing.expectEqual(@as(?u8, 5), parseInterfaceId("usb/input5/event0"));
+    // no inputN anywhere → null
+    try std.testing.expectEqual(@as(?u8, null), parseInterfaceId("usb/event0/dev"));
+}
+
 test "grabAssociatedEvdev sysfs path parsing" {
     // Build a temp sysfs-like tree and verify grab logic finds eventK entries.
     const allocator = std.testing.allocator;
