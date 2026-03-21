@@ -52,6 +52,7 @@ pub const EventLoop = struct {
     // device fds start at slot 2 (after signalfd + stop_pipe)
     device_base: usize,
     timer_fd: posix.fd_t,
+    uinput_ff_slot: ?usize,
     running: bool,
     gamepad_state: state.GamepadState,
 
@@ -83,6 +84,7 @@ pub const EventLoop = struct {
             .stop_w = stop_w,
             .device_base = 0,
             .timer_fd = timer_fd,
+            .uinput_ff_slot = null,
             .running = false,
             .gamepad_state = .{},
         };
@@ -101,6 +103,14 @@ pub const EventLoop = struct {
         const slot = self.fd_count;
         if (slot >= MAX_FDS) return error.TooManyFds;
         self.pollfds[slot] = device.pollfd();
+        self.fd_count += 1;
+    }
+
+    pub fn addUinputFf(self: *EventLoop, fd: posix.fd_t) !void {
+        const slot = self.fd_count;
+        if (slot >= MAX_FDS) return error.TooManyFds;
+        self.pollfds[slot] = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+        self.uinput_ff_slot = slot;
         self.fd_count += 1;
     }
 
@@ -136,6 +146,13 @@ pub const EventLoop = struct {
                 var expiry: [8]u8 = undefined;
                 _ = posix.read(self.timer_fd, &expiry) catch {};
                 if (mapper) |m| m.onTimerExpired();
+            }
+
+            // Check uinput FF fd
+            if (self.uinput_ff_slot) |slot| {
+                if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
+                    _ = output.pollFf() catch {};
+                }
             }
 
             // Check device fds
@@ -194,6 +211,20 @@ pub const EventLoop = struct {
 const testing = std.testing;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const uinput = @import("io/uinput.zig");
+
+test "EventLoop.addUinputFf registers fd and increments fd_count" {
+    var loop = try EventLoop.init();
+    defer loop.deinit();
+
+    const pfds = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(pfds[0]);
+    defer posix.close(pfds[1]);
+
+    try loop.addUinputFf(pfds[0]);
+    try testing.expectEqual(@as(usize, 4), loop.fd_count);
+    try testing.expectEqual(@as(?usize, 3), loop.uinput_ff_slot);
+    try testing.expectEqual(pfds[0], loop.pollfds[3].fd);
+}
 
 test "EventLoop.init creates signalfd and timerfd" {
     var loop = try EventLoop.init();

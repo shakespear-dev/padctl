@@ -114,7 +114,7 @@ pub const UinputDevice = struct {
     const AxisStateField = enum { ax, ay, rx, ry, lt, rt, dpad_x, dpad_y };
 
     pub fn create(cfg: *const device.OutputConfig) !UinputDevice {
-        const flags = std.posix.O{ .ACCMODE = .WRONLY, .NONBLOCK = true };
+        const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
         const fd = try std.posix.open("/dev/uinput", flags, 0);
         errdefer std.posix.close(fd);
 
@@ -338,37 +338,39 @@ pub const UinputDevice = struct {
         self.prev = s;
     }
 
+    pub fn pollFfFd(self: *UinputDevice) std.posix.fd_t {
+        return self.fd;
+    }
+
     pub fn pollFf(self: *UinputDevice) !?FfEvent {
-        var ev: c.input_event = undefined;
-        const nread = std.posix.read(self.fd, std.mem.asBytes(&ev)) catch |err| switch (err) {
-            error.WouldBlock => return null,
-            else => return err,
-        };
-        if (nread < @sizeOf(c.input_event)) return null;
+        var result: ?FfEvent = null;
+        while (true) {
+            var ev: c.input_event = undefined;
+            const n = std.posix.read(self.fd, std.mem.asBytes(&ev)) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => return err,
+            };
+            if (n != @sizeOf(c.input_event)) break;
 
-        if (ev.type == c.EV_UINPUT) {
-            if (ev.code == c.UI_FF_UPLOAD) {
-                var upload = std.mem.zeroes(c.uinput_ff_upload);
-                upload.request_id = @intCast(ev.value);
-                _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
-                upload.retval = 0;
-                _ = std.os.linux.ioctl(self.fd, UI_END_FF_UPLOAD, @intFromPtr(&upload));
-            } else if (ev.code == c.UI_FF_ERASE) {
-                var erase = std.mem.zeroes(c.uinput_ff_erase);
-                erase.request_id = @intCast(ev.value);
-                _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
-                erase.retval = 0;
-                _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
+            if (ev.type == c.EV_UINPUT) {
+                if (ev.code == c.UI_FF_UPLOAD) {
+                    var upload = std.mem.zeroes(c.uinput_ff_upload);
+                    upload.request_id = @intCast(ev.value);
+                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, @intFromPtr(&upload));
+                    upload.retval = 0;
+                    _ = std.os.linux.ioctl(self.fd, UI_END_FF_UPLOAD, @intFromPtr(&upload));
+                } else if (ev.code == c.UI_FF_ERASE) {
+                    var erase = std.mem.zeroes(c.uinput_ff_erase);
+                    erase.request_id = @intCast(ev.value);
+                    _ = std.os.linux.ioctl(self.fd, UI_BEGIN_FF_ERASE, @intFromPtr(&erase));
+                    erase.retval = 0;
+                    _ = std.os.linux.ioctl(self.fd, UI_END_FF_ERASE, @intFromPtr(&erase));
+                }
+            } else if (ev.type == c.EV_FF) {
+                result = FfEvent{ .effect_type = c.FF_RUMBLE, .strong = 0, .weak = 0 };
             }
-            return null;
         }
-
-        if (ev.type == c.EV_FF) {
-            // Phase 1: return the event for future routing; strong/weak not available without effect store
-            return FfEvent{ .effect_type = c.FF_RUMBLE, .strong = 0, .weak = 0 };
-        }
-
-        return null;
+        return result;
     }
 
     pub fn close(self: *UinputDevice) void {
@@ -679,4 +681,50 @@ test "emitAux: existing key event unaffected by rel addition" {
 test "ioctl constant: UI_SET_RELBIT matches kernel value" {
     const expected: u32 = (1 << 30) | (@as(u32, 'U') << 8) | 102 | (@as(u32, @sizeOf(c_int)) << 16);
     try std.testing.expectEqual(expected, UI_SET_RELBIT);
+}
+
+test "pollFf drain loop: empty pipe returns null without blocking" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    const result = try dev.pollFf();
+    try std.testing.expectEqual(@as(?FfEvent, null), result);
+}
+
+test "pollFf drain loop: drains multiple events and returns last EV_FF" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    // Write two EV_FF events to the pipe
+    const ev1 = c.input_event{ .type = c.EV_FF, .code = 0, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const ev2 = c.input_event{ .type = c.EV_FF, .code = 1, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev1));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev2));
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    const result = try dev.pollFf();
+    // Both events processed; last one wins — result is non-null FfEvent
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u16, c.FF_RUMBLE), result.?.effect_type);
+}
+
+test "pollFfFd returns the fd" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    try std.testing.expectEqual(pfds[0], dev.pollFfFd());
 }
