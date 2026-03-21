@@ -49,7 +49,7 @@ static int32_t mult_frac(int32_t numer, int32_t val, int32_t denom) {
 }
 
 static void parse_calibration(const uint8_t *buf, int32_t len, cal_params_t *cal) {
-    if (len < 41) return;
+    if (len < 35) return;
 
     // Skip byte 0 (report_id).  All values i16le starting at byte 1.
     int16_t gyro_pitch_plus  = read_i16le(buf + 7);
@@ -123,7 +123,7 @@ void process_calibration(const void *buf, int32_t len) {
 
 int32_t process_report(const void *raw, int32_t raw_len,
                        void *out, int32_t out_len) {
-    if (raw_len < 28 || out_len < raw_len) return -1;
+    if (raw_len < 30 || out_len < raw_len) return -1;
 
     // Copy entire report first
     const uint8_t *src = (const uint8_t *)raw;
@@ -133,14 +133,18 @@ int32_t process_report(const void *raw, int32_t raw_len,
     // Retrieve calibration state
     cal_params_t cal;
     int32_t got = get_state(STATE_KEY, STATE_KEY_LEN, (void *)&cal, PARAM_BYTES);
-    if (got < PARAM_BYTES) return 0; // no calibration data, pass through as-is
+    if (got < PARAM_BYTES) return -1; // no calibration data — drop frame
 
-    // Determine IMU base offset: USB report 0x01 starts at 16, BT report 0x31 at 17
-    int32_t imu_off;
-    if (src[0] == 0x31)
-        imu_off = 17;
-    else
-        imu_off = 16;
+    // IMU base offset from device config; default 16 (USB)
+    int32_t imu_off = 16;
+    uint8_t cfg_buf[4];
+    int32_t cfg_len = get_config("imu_offset", 10, cfg_buf, 4);
+    if (cfg_len > 0 && cfg_len <= 4) {
+        int32_t v = 0;
+        for (int32_t i = 0; i < cfg_len; i++)
+            v = v * 10 + (cfg_buf[i] - '0');
+        imu_off = v;
+    }
 
     if (raw_len < imu_off + 12) return 0;
 

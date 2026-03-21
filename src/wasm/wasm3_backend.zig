@@ -118,6 +118,7 @@ pub const Wasm3Plugin = struct {
         var ret: i32 = -1;
         if (getResultI32(f, &ret)) return .drop;
 
+        // TODO: consider adding ret=1 as passthrough variant if plugins need "skip me" semantics
         if (ret >= 0) {
             memcpyFromWasm(out, mem, output_offset) orelse return .drop;
             return .{ .override = deltaFromBytes(out) };
