@@ -12,7 +12,7 @@ T1a–T1e sequential (each depends on prior). T2 and T3 deferred until T1 verifi
 ## T1a: Vendor wasm3 source
 
 - [ ] Create `third_party/wasm3/source/` directory
-- [ ] Copy 12 C source files from wasm3 commit `79d412ea`:
+- [ ] Copy 17 C source files from wasm3 commit `79d412ea`:
   `m3_api_libc.c`, `m3_api_meta.c`, `m3_api_tracer.c`, `m3_api_uvwasi.c`,
   `m3_api_wasi.c`, `m3_bind.c`, `m3_code.c`, `m3_compile.c`, `m3_core.c`,
   `m3_emit.c`, `m3_env.c`, `m3_exec.c`, `m3_function.c`, `m3_info.c`,
@@ -76,7 +76,7 @@ T1a–T1e sequential (each depends on prior). T2 and T3 deferred until T1 verifi
 ## T1d: Host function binding
 
 - [ ] Implement `bindHostFunctions(rt, ctx)` in `wasm3_backend.zig`:
-  - For each of the 7 host functions, call `m3_LinkRawFunctionEx`:
+  - For each of the 6 host functions, call `m3_LinkRawFunctionEx`:
     ```zig
     _ = m3.m3_LinkRawFunctionEx(module, "env", "device_read", "i(iii)", hostDeviceRead, ctx);
     ```
@@ -87,8 +87,8 @@ T1a–T1e sequential (each depends on prior). T2 and T3 deferred until T1 verifi
   - If `ptr + len > mem_size`: log warning, return -1
   - Read/write host-side data at `mem[ptr..ptr+len]`
   - Delegate to `HostContext` method
-- [ ] 7 callbacks: `hostDeviceRead`, `hostDeviceWrite`, `hostLog`, `hostGetConfig`,
-  `hostSetState`, `hostGetState`, `hostGetReportField`
+- [ ] 6 callbacks: `hostDeviceRead`, `hostDeviceWrite`, `hostLog`, `hostGetConfig`,
+  `hostSetState`, `hostGetState`
 - [ ] All bounds checks use `@intCast` with explicit range validation (no UB on negative ptr)
 
 ## T1e: processReport / initDevice / processCalibration
@@ -142,7 +142,7 @@ Depends on: T1 fully verified and merged.
 
 Depends on: T1 and T2.
 
-- [ ] Create `sdk/plugin.h` — C header defining the 3 export signatures and 7 import declarations
+- [ ] Create `sdk/plugin.h` — C header defining the 3 export signatures and 6 import declarations
 - [ ] Create `sdk/README.md` — build instructions for C/Zig/Rust plugins targeting `wasm32-freestanding`
 - [ ] Create `sdk/examples/echo.c` — minimal echo plugin in C
 - [ ] Verify: `clang --target=wasm32 -nostdlib sdk/examples/echo.c -o echo.wasm` compiles

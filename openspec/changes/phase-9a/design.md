@@ -4,22 +4,22 @@
 
 | File | Role |
 |------|------|
-| `third_party/wasm3/source/*.c` | Vendored wasm3 C source (12 files + headers) |
+| `third_party/wasm3/source/*.c` | Vendored wasm3 C source (17 files + headers) |
 | `third_party/wasm3/source/*.h` | Vendored wasm3 headers |
 | `build.zig` | `-Dwasm` flag, `addCSourceFiles`, wasm3 module injection |
-| `src/wasm/wasm3_backend.zig` | `Wasm3Plugin` struct implementing `WasmPlugin.VTable` |
+| `src/wasm/wasm3_backend.zig` | `Wasm3Plugin` struct implementing `WasmPlugin.VTable` (to be created) |
 | `src/wasm/runtime.zig` | Add conditional import: wasm3 backend or MockPlugin |
 | `src/main.zig` | Add `wasm3_backend` to `refAllDecls` for test discovery |
-| `src/test/fixtures/echo_plugin.wasm` | Pre-compiled echo plugin (from WAT) |
-| `src/test/fixtures/no_exports.wasm` | Pre-compiled module with no WASM exports |
-| `src/test/fixtures/trap_plugin.wasm` | Pre-compiled module that traps on call |
+| `src/test/fixtures/echo_plugin.wasm` | Pre-compiled echo plugin (from WAT) (to be created) |
+| `src/test/fixtures/no_exports.wasm` | Pre-compiled module with no WASM exports (to be created) |
+| `src/test/fixtures/trap_plugin.wasm` | Pre-compiled module that traps on call (to be created) |
 
 ## Architecture
 
 ### Vendoring Strategy
 
 wasm3 source is vendored at `third_party/wasm3/` pinned to commit `79d412ea`. The directory
-contains only the `source/` subdirectory (12 `.c` files, ~15 headers). No build system files,
+contains only the `source/` subdirectory (17 `.c` files, ~15 headers). No build system files,
 no tests, no examples. A `third_party/wasm3/VERSION` file records the pinned commit hash.
 
 Rationale: wasm3 is ~100KB compiled; vendoring avoids system dependency (P5). Pinned commit
@@ -34,7 +34,8 @@ build.zig
 ```
 
 When `-Dwasm=true`:
-1. `addCSourceFiles` compiles the 12 wasm3 `.c` files with `-std=c99 -DDEBUG=0`
+1. `addCSourceFiles` compiles the 17 wasm3 `.c` files with `-std=c99 -DDEBUG=0 -Dd_m3HasWASI=0`
+   (Note: `d_m3HasWASI` is the correct wasm3 config macro name — verify against pinned commit headers at vendor time)
 2. `addIncludePath` points to `third_party/wasm3/source/`
 3. The `wasm3_backend` module is added as an import to the main exe, test, and tsan modules
 4. `src/wasm/runtime.zig` conditionally imports `wasm3_backend.zig` via `@import`
@@ -87,7 +88,7 @@ pointer+length pairs referring to these offsets within its own linear memory add
 
 ### Host Function Binding
 
-7 host functions registered under module `"env"` via `m3_LinkRawFunctionEx`:
+6 host functions registered under module `"env"` via `m3_LinkRawFunctionEx`:
 
 | WASM Import | C Signature | HostContext Method |
 |-------------|-------------|--------------------|
@@ -97,7 +98,6 @@ pointer+length pairs referring to these offsets within its own linear memory add
 | `env.get_config` | `(key_ptr: i32, key_len: i32, out_ptr: i32, out_len: i32) -> i32` | `getConfig` |
 | `env.set_state` | `(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> void` | `setState` |
 | `env.get_state` | `(key_ptr: i32, key_len: i32, out_ptr: i32, out_len: i32) -> i32` | `getState` |
-| `env.get_report_field` | `(field_id: i32) -> i32` | (new: read parsed field by ID) |
 
 Each host function callback:
 1. Extracts pointer+length args from the wasm3 stack

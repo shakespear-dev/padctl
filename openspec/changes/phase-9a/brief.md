@@ -12,7 +12,7 @@ MockPlugin with a wasm3-backed implementation, making the WASM escape hatch (P7)
 - Vendor wasm3 C source into `third_party/wasm3/` (pinned commit)
 - `build.zig` integration: `-Dwasm=true/false` flag, `addCSourceFiles` for wasm3
 - `src/wasm/wasm3_backend.zig`: `Wasm3Plugin` struct implementing `WasmPlugin.VTable` via wasm3 C API
-- Host function binding: 7 callbacks registered via `m3_LinkRawFunctionEx`
+- Host function binding: 6 callbacks registered via `m3_LinkRawFunctionEx`
 - Memory layout: 8KB scratch area, 1MB linear memory limit (ADR-005)
 - Trap rate limiting (10 traps/second, auto-unload on exceeded)
 - WAT-compiled `.wasm` test fixtures for unit tests
@@ -35,7 +35,7 @@ MockPlugin with a wasm3-backed implementation, making the WASM escape hatch (P7)
 
 ## References
 
-- ADR: `decisions/005-wasm-plugin-runtime.md`
+- ADR: `decisions/005-wasm-plugin-runtime.md` (in docs-repo `~/Dev/Dev_Vault/padctl/`)
 - Phase plan: `_agent/state/needs-snapshot.md` (Phase 9, Wave 1)
 - Existing vtable: `src/wasm/runtime.zig`
 - Host functions: `src/wasm/host.zig`
