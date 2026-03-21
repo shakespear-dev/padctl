@@ -8,6 +8,7 @@ pub const tools = struct {
 pub const cli = struct {
     pub const install = @import("cli/install.zig");
     pub const scan = @import("cli/scan.zig");
+    pub const reload = @import("cli/reload.zig");
 };
 
 pub const wasm = struct {
@@ -68,7 +69,6 @@ const DeviceInstance = device_instance.DeviceInstance;
 const Supervisor = supervisor.Supervisor;
 const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
-
 const VERSION = "0.1.0";
 
 const Cli = struct {
@@ -82,6 +82,8 @@ const Cli = struct {
     install_opts: ?cli.install.InstallOptions = null,
     scan: bool = false,
     scan_config_dir: []const u8 = "/usr/share/padctl/devices",
+    reload: bool = false,
+    reload_pid: ?[]const u8 = null,
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -144,6 +146,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
             parsed_cli.doc_gen = true;
         } else if (std.mem.eql(u8, arg, "--output")) {
             parsed_cli.doc_gen_output = args.next() orelse return error.MissingArgValue;
+        } else if (std.mem.eql(u8, arg, "reload")) {
+            parsed_cli.reload = true;
+        } else if (std.mem.eql(u8, arg, "--pid")) {
+            parsed_cli.reload_pid = args.next() orelse return error.MissingArgValue;
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -157,13 +163,15 @@ fn printHelp() void {
         \\Usage: padctl [options]
         \\       padctl install [--prefix /usr] [--destdir ""]
         \\       padctl scan [--config-dir <dir>]
+        \\       padctl reload [--pid <pid>]
         \\
         \\Subcommands:
-        \\  install             Install binary, service, udev rules, and device configs
-        \\    --prefix <dir>    Installation prefix (default: /usr)
-        \\    --destdir <dir>   Staging root for package builds (default: "")
-        \\  scan                List connected HID devices and config match status
-        \\    --config-dir <d>  Search for device configs here (default: /usr/share/padctl/devices)
+        \\  install               Install binary, service, udev rules, and device configs
+        \\    --prefix <dir>      Installation prefix (default: /usr)
+        \\    --destdir <dir>     Staging root for package builds (default: "")
+        \\  scan                  List connected HID devices and config match status
+        \\    --config-dir <dir>  Search for device configs here (default: /usr/share/padctl/devices)
+        \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
         \\
         \\Options:
         \\  --config <path>     Device config TOML file (required to run)
@@ -204,6 +212,15 @@ pub fn main() !void {
     if (parsed.scan) {
         cli.scan.run(allocator, parsed.scan_config_dir) catch |err| {
             std.log.err("scan failed: {}", .{err});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    }
+
+    // reload subcommand
+    if (parsed.reload) {
+        cli.reload.run(allocator, parsed.reload_pid) catch |err| {
+            std.log.err("reload failed: {}", .{err});
             std.process.exit(1);
         };
         std.process.exit(0);
