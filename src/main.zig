@@ -20,6 +20,7 @@ pub const io = struct {
     pub const usbraw = @import("io/usbraw.zig");
     pub const uinput = @import("io/uinput.zig");
     pub const ioctl_constants = @import("io/ioctl_constants.zig");
+    pub const netlink = @import("io/netlink.zig");
 };
 
 pub const testing_support = struct {

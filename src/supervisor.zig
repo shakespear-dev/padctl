@@ -8,6 +8,7 @@ const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const config_device = @import("config/device.zig");
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
+const netlink = @import("io/netlink.zig");
 
 /// One running device under Supervisor management.
 pub const ManagedInstance = struct {
@@ -35,6 +36,7 @@ pub const Supervisor = struct {
     managed: std.ArrayList(ManagedInstance),
     stop_fd: posix.fd_t,
     hup_fd: posix.fd_t,
+    netlink_fd: posix.fd_t,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
 
@@ -52,11 +54,18 @@ pub const Supervisor = struct {
         const hup_fd = try posix.signalfd(-1, &hup_mask, 0);
         errdefer posix.close(hup_fd);
 
+        const nl_fd = netlink.openNetlinkUevent() catch |err| blk: {
+            std.log.warn("netlink unavailable: {}", .{err});
+            break :blk -1;
+        };
+        errdefer if (nl_fd >= 0) posix.close(nl_fd);
+
         return .{
             .allocator = allocator,
             .managed = .{},
             .stop_fd = stop_fd,
             .hup_fd = hup_fd,
+            .netlink_fd = nl_fd,
             .configs = .{},
         };
     }
@@ -64,6 +73,7 @@ pub const Supervisor = struct {
     pub fn deinit(self: *Supervisor) void {
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
+        if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
         for (self.managed.items) |*m| {
             m.instance.deinit();
             self.allocator.destroy(m.instance);
@@ -155,6 +165,100 @@ pub const Supervisor = struct {
         }
     }
 
+    /// Open /dev/{devname}, match VID/PID against loaded configs, spawn DeviceInstance.
+    pub fn attach(self: *Supervisor, devname: []const u8) void {
+        self.attachInner(devname) catch {};
+    }
+
+    fn attachInner(self: *Supervisor, devname: []const u8) !void {
+        var path_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "/dev/{s}", .{devname});
+
+        const fd = try posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0);
+        defer posix.close(fd);
+
+        const ioctl_c = @import("io/ioctl_constants.zig");
+        var info: ioctl_c.HidrawDevinfo = undefined;
+        if (linux.ioctl(fd, ioctl_c.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) return;
+        const vid: u16 = @bitCast(info.vendor);
+        const pid: u16 = @bitCast(info.product);
+
+        var parsed_full: ?*config_device.ParseResult = null;
+        for (self.configs.items) |c| {
+            if (@as(u16, @intCast(c.value.device.vid)) == vid and
+                @as(u16, @intCast(c.value.device.pid)) == pid)
+            {
+                parsed_full = c;
+                break;
+            }
+        }
+        if (parsed_full == null) return;
+
+        const phys = try readPhysicalPath(self.allocator, path);
+        defer self.allocator.free(phys);
+
+        for (self.managed.items) |*m| {
+            if (std.mem.eql(u8, m.phys_key, phys)) return;
+        }
+
+        const inst_ptr = try self.allocator.create(DeviceInstance);
+        errdefer self.allocator.destroy(inst_ptr);
+        inst_ptr.* = try DeviceInstance.init(self.allocator, &parsed_full.?.value);
+        errdefer inst_ptr.deinit();
+
+        try self.spawnInstance(phys, inst_ptr);
+    }
+
+    /// Stop and remove the managed instance associated with devname.
+    pub fn detach(self: *Supervisor, devname: []const u8) void {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/dev/{s}", .{devname}) catch return;
+
+        const phys = readPhysicalPath(self.allocator, path) catch {
+            // Device may already be gone; try matching by devname stored in phys_key.
+            for (self.managed.items, 0..) |*m, i| {
+                if (std.mem.eql(u8, m.phys_key, devname)) {
+                    m.instance.stop();
+                    m.thread.join();
+                    m.instance.deinit();
+                    self.allocator.destroy(m.instance);
+                    m.mapping_arena.deinit();
+                    self.allocator.free(m.phys_key);
+                    _ = self.managed.swapRemove(i);
+                    return;
+                }
+            }
+            return;
+        };
+        defer self.allocator.free(phys);
+
+        for (self.managed.items, 0..) |*m, i| {
+            if (std.mem.eql(u8, m.phys_key, phys)) {
+                m.instance.stop();
+                m.thread.join();
+                m.instance.deinit();
+                self.allocator.destroy(m.instance);
+                m.mapping_arena.deinit();
+                self.allocator.free(m.phys_key);
+                _ = self.managed.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
+        switch (action) {
+            .add => self.attach(devname),
+            .remove => self.detach(devname),
+            .other => {},
+        }
+    }
+
+    fn drainNetlink(self: *Supervisor) void {
+        if (self.netlink_fd < 0) return;
+        netlink.drainNetlink(self.netlink_fd, self, netlinkCallback);
+    }
+
     pub fn run(
         self: *Supervisor,
         initial_configs: []const ConfigEntry,
@@ -168,13 +272,15 @@ pub const Supervisor = struct {
         }
         defer self.stopAll();
 
-        var pollfds = [2]posix.pollfd{
+        var pollfds = [3]posix.pollfd{
             .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 },
             .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = self.netlink_fd, .events = posix.POLL.IN, .revents = 0 },
         };
+        const nfds: usize = if (self.netlink_fd >= 0) 3 else 2;
 
         while (true) {
-            _ = posix.ppoll(&pollfds, null, null) catch |err| switch (err) {
+            _ = posix.ppoll(pollfds[0..nfds], null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
@@ -200,6 +306,11 @@ pub const Supervisor = struct {
                 };
 
                 pollfds[1].revents = 0;
+            }
+
+            if (nfds == 3 and pollfds[2].revents & posix.POLL.IN != 0) {
+                self.drainNetlink();
+                pollfds[2].revents = 0;
             }
         }
     }
