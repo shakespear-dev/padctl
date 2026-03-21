@@ -60,7 +60,12 @@ pub const HostContext = struct {
         return f(ptr, key, out);
     }
 
+    const max_entries = 256;
+    const max_value_size = 4096;
+
     pub fn setState(self: *HostContext, key: []const u8, val: []const u8) void {
+        if (val.len > max_value_size) return;
+        if (!self.state_map.contains(key) and self.state_map.count() >= max_entries) return;
         const gop = self.state_map.getOrPut(key) catch return;
         const owned_val = self.allocator.dupe(u8, val) catch {
             if (!gop.found_existing) _ = self.state_map.remove(key);

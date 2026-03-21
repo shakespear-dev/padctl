@@ -61,6 +61,7 @@ pub const UsbrawDevice = struct {
     pipe_r: std.posix.fd_t,
     pipe_w: std.posix.fd_t,
     ring: RingBuffer,
+    disconnected: std.atomic.Value(bool),
     should_stop: std.atomic.Value(bool),
     thread: std.Thread,
     allocator: std.mem.Allocator,
@@ -95,7 +96,7 @@ pub const UsbrawDevice = struct {
             return error.ClaimFailed;
         }
 
-        const pipe_fds = try std.posix.pipe();
+        const pipe_fds = try std.posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
 
         const self = try alloc.create(UsbrawDevice);
         self.* = .{
@@ -107,6 +108,7 @@ pub const UsbrawDevice = struct {
             .pipe_r = pipe_fds[0],
             .pipe_w = pipe_fds[1],
             .ring = .{},
+            .disconnected = std.atomic.Value(bool).init(false),
             .should_stop = std.atomic.Value(bool).init(false),
             .thread = undefined,
             .allocator = alloc,
@@ -130,8 +132,8 @@ pub const UsbrawDevice = struct {
             );
 
             if (rc == c.LIBUSB_ERROR_NO_DEVICE) {
-                // Device disconnected — write sentinel and exit
-                _ = std.posix.write(self.pipe_w, "\x00") catch {};
+                self.disconnected.store(true, .release);
+                _ = std.posix.write(self.pipe_w, "\x01") catch {};
                 break;
             }
 
@@ -156,15 +158,9 @@ pub const UsbrawDevice = struct {
 
     fn read(ptr: *anyopaque, buf: []u8) DeviceIO.ReadError!usize {
         const self: *UsbrawDevice = @ptrCast(@alignCast(ptr));
+        if (self.disconnected.load(.acquire)) return DeviceIO.ReadError.Disconnected;
         var dummy: [1]u8 = undefined;
-        const pipe_n = std.posix.read(self.pipe_r, &dummy) catch 0;
-
-        if (pipe_n > 0 and dummy[0] == 0x00) {
-            const ring_n = self.ring.pop(buf);
-            if (ring_n == 0) return DeviceIO.ReadError.Disconnected;
-            return ring_n;
-        }
-
+        _ = std.posix.read(self.pipe_r, &dummy) catch {};
         const n = self.ring.pop(buf);
         if (n == 0) return DeviceIO.ReadError.Again;
         return n;
