@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // -Dlibusb=false disables libusb linkage for musl cross-compile
     const use_libusb = b.option(bool, "libusb", "Link libusb-1.0 (default: true)") orelse true;
+    const coverage = b.option(bool, "test-coverage", "Run tests with kcov coverage") orelse false;
 
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
@@ -97,6 +98,7 @@ pub fn build(b: *std.Build) void {
         unit_tests.addIncludePath(b.path("compat"));
     }
     unit_tests.linkLibC();
+    if (coverage) unit_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     const test_step = b.step("test", "Run Layer 0 + Layer 1 tests (CI)");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
@@ -122,6 +124,7 @@ pub fn build(b: *std.Build) void {
 
     // capture L0 tests (analyse pure functions)
     const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod });
+    if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
     test_step.dependOn(&b.addRunArtifact(capture_tests).step);
 
     // test-integration: Layer 2 (UHID, requires privilege)
