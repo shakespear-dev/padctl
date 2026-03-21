@@ -4,72 +4,131 @@ Universal Linux gamepad compatibility layer.
 
 padctl maps vendor-specific USB/HID reports from gamepads to standard Linux input events via uinput, using declarative TOML device configs — no kernel patches, no custom drivers.
 
-## How it works
+## Architecture
 
 ```
-TOML device config
-      │
-      ▼
-  padctl (userspace daemon)
-      │  reads raw HID reports from /dev/hidraw*
-      │  applies field mappings and transforms
-      ▼
-  /dev/uinput  →  standard evdev gamepad
+┌─────────────────────────────────┐
+│  Mapping config (TOML)          │  remap / layers / gyro / macros
+│  Device config  (TOML)          │  report layout, field offsets, transforms
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────┐
+│  padctl daemon (userspace)      │
+│                                 │
+│  Supervisor ──► DeviceInstance  │  one thread per physical device
+│      │              │           │
+│   netlink         HidrawDevice  │  reads /dev/hidrawN
+│  (hotplug)        Interpreter   │  applies field mappings + transforms
+│                   Mapper/Layer  │  applies mapping config
+│                   MacroPlayer   │  plays back timed key sequences
+└────────────────┬────────────────┘
+                 │
+                 ▼
+        /dev/uinput  →  standard evdev gamepad / mouse / keyboard
 ```
-
-Each device config declares report layout, field offsets, transforms, and button mappings. The same generic interpreter handles all devices.
 
 ## Features
 
-- Declarative TOML config — add device support without recompiling
-- Axes, buttons, triggers, IMU (gyro/accelerometer)
-- Transform pipeline: scale, negate, deadzone, clamp
-- Rumble/haptic feedback passthrough
-- Daemon mode (netlink hotplug) and per-device mode (udev template)
-- `padctl-capture` tool to generate TOML skeleton from live HID stream
-- `padctl --validate` for CI-friendly config validation
-- Zero runtime dependencies beyond libusb
+- **Declarative TOML config** — add or modify device support without recompiling
+- **Layer system** — hold/toggle/tap-hold layers per mapping config; each layer can override remaps, gyro mode, and stick mode independently
+- **Gyro mouse** — map gyro axes to REL_X/REL_Y with configurable sensitivity, deadzone, smoothing, and curve; activate on a button hold
+- **Stick mouse/scroll** — left or right stick in `mouse` or `scroll` mode with dt-based accumulation
+- **Macros** — named sequences of tap/down/up/delay steps bound to any button
+- **Multi-device** — `--config-dir` globs all *.toml, deduplicates by physical path, runs each device in its own thread
+- **Hot-reload** — SIGHUP re-reads configs without restarting; diffed per physical device (new devices spawned, removed devices stopped, unchanged devices untouched)
+- **Hotplug** — netlink `UEVENT` listener adds/removes devices at runtime
+- **Force feedback** — FF_RUMBLE passthrough: uinput receives game vibration commands and forwards them to the physical device via HID output reports
+- **10 device configs** — ships with configs for Sony, Nintendo, Microsoft, Valve, 8BitDo, Flydigi, HORI, and Lenovo devices
 
-## Quick start
+## Quick Start
 
 ### Install
 
-Build from source (see [Building from source](#building-from-source)), then:
-
 ```sh
-sudo cp zig-out/bin/padctl zig-out/bin/padctl-capture /usr/bin/
-sudo cp install/padctl.service install/padctl@.service /etc/systemd/system/
-sudo cp install/99-padctl.rules /etc/udev/rules.d/
-sudo systemctl daemon-reload
-sudo udevadm control --reload-rules
+sudo padctl install
 ```
 
-### Configure
+This copies the binary, systemd service, device configs, and udev rules into `/usr`. Runs `systemctl daemon-reload` and `udevadm trigger` automatically.
 
-Place device configs in `/etc/padctl/devices.d/`. Configs for supported devices are in `devices/`.
+Custom prefix (e.g. for packaging):
 
 ```sh
-sudo mkdir -p /etc/padctl/devices.d
-sudo cp devices/sony/dualsense.toml /etc/padctl/devices.d/
+sudo padctl install --prefix /usr --destdir "$DESTDIR"
 ```
+
+### Scan
+
+```sh
+padctl scan
+```
+
+Lists all connected HID devices and whether a device config was found for each.
 
 ### Run
 
 ```sh
-# Daemon mode — manages all devices via netlink hotplug
+# Daemon mode — manages all matched devices, handles hotplug
 sudo systemctl enable --now padctl.service
 
-# Or per-device mode — udev starts one instance per device plug-in
-sudo systemctl enable padctl@sony-dualsense.service
+# Or run directly with a single config
+sudo padctl --config /usr/share/padctl/devices/sony/dualsense.toml
 ```
 
-## Device config example
+## CLI Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `install [--prefix] [--destdir]` | Install binary, service, udev rules, device configs |
+| `scan [--config-dir <dir>]` | List connected HID devices and config match status |
+| `reload [--pid <pid>]` | Send SIGHUP to running daemon (triggers hot-reload) |
+| `config list` | List device and mapping configs found in XDG search paths |
+| `config init [--device] [--preset]` | Interactively create a mapping in `~/.config/padctl/mappings/` |
+| `config edit [name]` | Open mapping in `$VISUAL`/`$EDITOR`; validates on exit |
+| `config test [--config] [--mapping]` | Live input preview (Ctrl-C to exit) |
+| `--validate <path> [...]` | Validate one or more device config files; exit 0/1/2 |
+| `--doc-gen --config <path> [--output <dir>]` | Generate Markdown device reference from config(s) |
+
+## XDG Config Paths
+
+padctl follows the XDG Base Directory spec. On bare invocation it searches for device configs in priority order:
+
+| Priority | Path |
+|---|---|
+| 1 (user) | `$XDG_CONFIG_HOME/padctl/devices/` or `~/.config/padctl/devices/` |
+| 2 (system) | `/etc/padctl/devices/` |
+| 3 (builtin) | `/usr/share/padctl/devices/` |
+
+The same three-tier search applies to mapping configs (`devices/` → `mappings/`).
+
+User-level configs always take precedence. Place personal overrides in `~/.config/padctl/`.
+
+## Supported Devices
+
+| Vendor | Model | Config | Gyro | FF |
+|---|---|---|---|---|
+| Sony | DualSense (PS5) | `devices/sony/dualsense.toml` | yes | yes |
+| Nintendo | Switch Pro Controller | `devices/nintendo/switch-pro.toml` | — | — |
+| Microsoft | Xbox Elite Series 2 | `devices/microsoft/xbox-elite.toml` | — | yes |
+| Valve | Steam Deck | `devices/valve/steam-deck.toml` | yes | yes |
+| 8BitDo | Ultimate Controller | `devices/8bitdo/ultimate.toml` | — | — |
+| Flydigi | Vader 5 Pro | `devices/flydigi/vader5.toml` | yes | yes |
+| Flydigi | Vader 4 Pro | `devices/flydigi/vader4-pro.toml` | yes | — |
+| HORI | Horipad Steam | `devices/hori/horipad-steam.toml` | yes | — |
+| Lenovo | Legion Go | `devices/lenovo/legion-go.toml` | — | — |
+| Lenovo | Legion Go S | `devices/lenovo/legion-go-s.toml` | — | yes |
+
+## Device Config Example
 
 ```toml
 [device]
 name = "Sony DualSense"
 vid = 0x054c
 pid = 0x0ce6
+
+[[device.interface]]
+id = 3
+class = "hid"
 
 [[report]]
 name = "usb"
@@ -85,52 +144,52 @@ left_x  = { offset = 1, type = "u8", transform = "scale(-32768, 32767)" }
 left_y  = { offset = 2, type = "u8", transform = "scale(-32768, 32767), negate" }
 lt      = { offset = 5, type = "u8" }
 cross   = { offset = 8, type = "bit", bit = 4 }
+gyro_x  = { offset = 16, type = "i16le" }
 ```
 
-## Supported devices
+## Mapping Config Example
 
-| Vendor     | Model                  | Config                              |
-|------------|------------------------|-------------------------------------|
-| Sony       | DualSense (PS5)        | `devices/sony/dualsense.toml`       |
-| Nintendo   | Switch Pro Controller  | `devices/nintendo/switch-pro.toml`  |
-| 8BitDo     | Ultimate               | `devices/8bitdo/ultimate.toml`      |
-| Microsoft  | Xbox Elite Series 2    | `devices/microsoft/xbox-elite.toml` |
-| Flydigi    | Vader 5                | `devices/flydigi/vader5.toml`       |
+```toml
+name = "fps"
 
-## Building from source
+[gyro]
+mode = "mouse"
+activate = "L3"
+sensitivity = 2.0
+deadzone = 300
 
-**Requirements:** Zig 0.15+, libusb-1.0
+[[layer]]
+name = "shift"
+trigger = "R1"
+activation = "hold"
+tap = "R1"
 
-```sh
-# Debian/Ubuntu
-sudo apt-get install libusb-1.0-0-dev
+[layer.remap]
+south = "KEY_SPACE"
 
-# Fedora/RHEL
-sudo dnf install libusb1-devel
-
-# Arch
-sudo pacman -S libusb
+[[macro]]
+name = "rush"
+steps = [
+  { tap = "KEY_W" },
+  { delay = 50 },
+  { tap = "KEY_W" },
+]
 ```
+
+## Building from Source
+
+**Requirements:** Zig 0.15+
 
 ```sh
 zig build
-# outputs: zig-out/bin/padctl  zig-out/bin/padctl-capture
+# outputs: zig-out/bin/padctl  zig-out/bin/padctl-capture  zig-out/bin/padctl-debug
 ```
 
 ```sh
 zig build test
 ```
 
-## systemd integration
-
-Two service modes are provided in `install/`:
-
-| Mode | Service | Trigger |
-|------|---------|---------|
-| Daemon | `padctl.service` | starts at boot, manages all devices via netlink |
-| Per-device | `padctl@.service` | udev starts one instance per device plug-in |
-
-Run one mode at a time. See [`install/README.md`](install/README.md) for full setup instructions.
+Distro packages for libusb are not required at build time — padctl uses the kernel hidraw and uinput interfaces directly.
 
 ## Contributing
 
