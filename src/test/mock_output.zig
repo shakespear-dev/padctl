@@ -31,14 +31,14 @@ pub const MockOutput = struct {
         .close = mockClose,
     };
 
-    fn mockEmit(ptr: *anyopaque, s: GamepadState) anyerror!void {
+    fn mockEmit(ptr: *anyopaque, s: GamepadState) uinput.EmitError!void {
         const self: *MockOutput = @ptrCast(@alignCast(ptr));
-        try self.diffs.append(self.allocator, s.diff(self.prev));
-        try self.emitted.append(self.allocator, s);
+        self.diffs.append(self.allocator, s.diff(self.prev)) catch return error.WriteFailed;
+        self.emitted.append(self.allocator, s) catch return error.WriteFailed;
         self.prev = s;
     }
 
-    fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
+    fn mockPollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
         return null;
     }
 

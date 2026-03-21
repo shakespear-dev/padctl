@@ -33,3 +33,7 @@ pub const UI_BEGIN_FF_ERASE = IOCTL.IOWR('U', 202, c.uinput_ff_erase);
 pub const UI_END_FF_ERASE = IOCTL.IOW('U', 203, c.uinput_ff_erase);
 
 pub const HidrawDevinfo = c.hidraw_devinfo;
+
+// eventfd
+pub const EFD_CLOEXEC: u32 = 0o2000000;
+pub const EFD_NONBLOCK: u32 = 0o4000;

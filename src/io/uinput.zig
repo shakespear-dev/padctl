@@ -53,21 +53,24 @@ pub const FfEvent = struct {
     weak: u16,
 };
 
+pub const EmitError = error{ WriteFailed, DeviceGone };
+pub const PollFfError = error{ ReadFailed, DeviceGone };
+
 pub const OutputDevice = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        emit: *const fn (ptr: *anyopaque, s: state.GamepadState) anyerror!void,
-        poll_ff: *const fn (ptr: *anyopaque) anyerror!?FfEvent,
+        emit: *const fn (ptr: *anyopaque, s: state.GamepadState) EmitError!void,
+        poll_ff: *const fn (ptr: *anyopaque) PollFfError!?FfEvent,
         close: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn emit(self: OutputDevice, s: state.GamepadState) !void {
+    pub fn emit(self: OutputDevice, s: state.GamepadState) EmitError!void {
         return self.vtable.emit(self.ptr, s);
     }
 
-    pub fn pollFf(self: OutputDevice) !?FfEvent {
+    pub fn pollFf(self: OutputDevice) PollFfError!?FfEvent {
         return self.vtable.poll_ff(self.ptr);
     }
 
@@ -83,11 +86,11 @@ pub const AuxOutputDevice = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        emit_aux: *const fn (ptr: *anyopaque, events: []const AuxEvent) anyerror!void,
+        emit_aux: *const fn (ptr: *anyopaque, events: []const AuxEvent) EmitError!void,
         close: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn emitAux(self: AuxOutputDevice, events: []const AuxEvent) !void {
+    pub fn emitAux(self: AuxOutputDevice, events: []const AuxEvent) EmitError!void {
         return self.vtable.emit_aux(self.ptr, events);
     }
 
@@ -268,14 +271,14 @@ pub const UinputDevice = struct {
         .close = closeVtable,
     };
 
-    fn emitVtable(ptr: *anyopaque, s: state.GamepadState) anyerror!void {
+    fn emitVtable(ptr: *anyopaque, s: state.GamepadState) EmitError!void {
         const self: *UinputDevice = @ptrCast(@alignCast(ptr));
-        return self.emit(s);
+        self.emit(s) catch return error.WriteFailed;
     }
 
-    fn pollFfVtable(ptr: *anyopaque) anyerror!?FfEvent {
+    fn pollFfVtable(ptr: *anyopaque) PollFfError!?FfEvent {
         const self: *UinputDevice = @ptrCast(@alignCast(ptr));
-        return self.pollFf();
+        return self.pollFf() catch return error.ReadFailed;
     }
 
     fn closeVtable(ptr: *anyopaque) void {
@@ -431,9 +434,9 @@ pub const AuxDevice = struct {
         .close = closeVtable,
     };
 
-    fn emitAuxVtable(ptr: *anyopaque, events: []const AuxEvent) anyerror!void {
+    fn emitAuxVtable(ptr: *anyopaque, events: []const AuxEvent) EmitError!void {
         const self: *AuxDevice = @ptrCast(@alignCast(ptr));
-        return self.emitAux(events);
+        self.emitAux(events) catch return error.WriteFailed;
     }
 
     fn closeVtable(ptr: *anyopaque) void {
@@ -480,11 +483,11 @@ pub const TouchpadOutputDevice = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        emit_touch: *const fn (ptr: *anyopaque, s: state.GamepadState) anyerror!void,
+        emit_touch: *const fn (ptr: *anyopaque, s: state.GamepadState) EmitError!void,
         close: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn emitTouch(self: TouchpadOutputDevice, s: state.GamepadState) !void {
+    pub fn emitTouch(self: TouchpadOutputDevice, s: state.GamepadState) EmitError!void {
         return self.vtable.emit_touch(self.ptr, s);
     }
 
@@ -632,9 +635,9 @@ pub const TouchpadDevice = struct {
         .close = closeTouchVtable,
     };
 
-    fn emitTouchVtable(ptr: *anyopaque, s: state.GamepadState) anyerror!void {
+    fn emitTouchVtable(ptr: *anyopaque, s: state.GamepadState) EmitError!void {
         const self: *TouchpadDevice = @ptrCast(@alignCast(ptr));
-        return self.emit(s);
+        self.emit(s) catch return error.WriteFailed;
     }
 
     fn closeTouchVtable(ptr: *anyopaque) void {
@@ -673,15 +676,14 @@ const MockOutputDevice = struct {
         .close = mockClose,
     };
 
-    fn mockEmit(ptr: *anyopaque, s: state.GamepadState) anyerror!void {
+    fn mockEmit(ptr: *anyopaque, s: state.GamepadState) EmitError!void {
         const self: *MockOutputDevice = @ptrCast(@alignCast(ptr));
-        // Only record if state changed (simulate differential)
         if (std.meta.eql(s, self.prev)) return;
-        try self.emitted.append(self.allocator, s);
+        self.emitted.append(self.allocator, s) catch return error.WriteFailed;
         self.prev = s;
     }
 
-    fn mockPollFf(_: *anyopaque) anyerror!?FfEvent {
+    fn mockPollFf(_: *anyopaque) PollFfError!?FfEvent {
         return null;
     }
 
@@ -768,10 +770,10 @@ const MockAuxDevice = struct {
         .close = mockAuxClose,
     };
 
-    fn mockEmitAux(ptr: *anyopaque, events: []const AuxEvent) anyerror!void {
+    fn mockEmitAux(ptr: *anyopaque, events: []const AuxEvent) EmitError!void {
         const self: *MockAuxDevice = @ptrCast(@alignCast(ptr));
         for (events) |ev| {
-            try self.emitted.append(self.allocator, ev);
+            self.emitted.append(self.allocator, ev) catch return error.WriteFailed;
         }
     }
 

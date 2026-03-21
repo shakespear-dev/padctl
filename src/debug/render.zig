@@ -14,10 +14,6 @@ const RED = "\x1b[31m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
-fn moveTo(writer: anytype, row: u8, col: u8) !void {
-    try writer.print(CSI ++ "{d};{d}H", .{ row, col });
-}
-
 fn clearScreen(writer: anytype) !void {
     try writer.writeAll(CSI ++ "2J" ++ CSI ++ "H");
 }
@@ -211,7 +207,6 @@ pub fn renderFrame(
     }
     try writer.writeAll(BOLD ++ CYAN ++ "────────────────────────────────────────────┘" ++ RESET);
     try writer.writeAll("\r\n");
-    _ = moveTo; // suppress unused warning; used in non-clearScreen rendering path if needed
 }
 
 // --- tests ---

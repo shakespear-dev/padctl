@@ -4,12 +4,13 @@ const posix = std.posix;
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const UsbrawDevice = @import("io/usbraw.zig").UsbrawDevice;
-const UinputDevice = @import("io/uinput.zig").UinputDevice;
-const AuxDevice = @import("io/uinput.zig").AuxDevice;
-const TouchpadDevice = @import("io/uinput.zig").TouchpadDevice;
-const OutputDevice = @import("io/uinput.zig").OutputDevice;
-const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
-const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
+const uinput = @import("io/uinput.zig");
+const UinputDevice = uinput.UinputDevice;
+const AuxDevice = uinput.AuxDevice;
+const TouchpadDevice = uinput.TouchpadDevice;
+const OutputDevice = uinput.OutputDevice;
+const AuxOutputDevice = uinput.AuxOutputDevice;
+const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
 const Mapper = @import("core/mapper.zig").Mapper;
@@ -18,7 +19,7 @@ const InterfaceConfig = @import("config/device.zig").InterfaceConfig;
 const MappingConfig = @import("config/mapping.zig").MappingConfig;
 const init_seq = @import("init.zig");
 const GamepadState = @import("core/state.zig").GamepadState;
-const FfEvent = @import("io/uinput.zig").FfEvent;
+const FfEvent = uinput.FfEvent;
 
 fn createDeviceIO(
     allocator: std.mem.Allocator,
@@ -208,10 +209,10 @@ pub const DeviceInstance = struct {
 
 const null_output_vtable = OutputDevice.VTable{
     .emit = struct {
-        fn f(_: *anyopaque, _: GamepadState) anyerror!void {}
+        fn f(_: *anyopaque, _: GamepadState) uinput.EmitError!void {}
     }.f,
     .poll_ff = struct {
-        fn f(_: *anyopaque) anyerror!?FfEvent {
+        fn f(_: *anyopaque) uinput.PollFfError!?FfEvent {
             return null;
         }
     }.f,
@@ -228,7 +229,6 @@ fn nullOutput() OutputDevice {
 
 const testing = std.testing;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
-const uinput = @import("io/uinput.zig");
 const mapping = @import("config/mapping.zig");
 const device_mod = @import("config/device.zig");
 

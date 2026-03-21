@@ -5,7 +5,10 @@ const linux = std.os.linux;
 const DeviceIO = @import("io/device_io.zig").DeviceIO;
 const Interpreter = @import("core/interpreter.zig").Interpreter;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
+const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
+const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
 const state = @import("core/state.zig");
+const GamepadStateDelta = state.GamepadStateDelta;
 const mapper_mod = @import("core/mapper.zig");
 const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const fillTemplate = @import("core/command.zig").fillTemplate;
@@ -53,10 +56,10 @@ pub fn disarmTimer(fd: posix.fd_t) void {
 pub const EventLoopContext = struct {
     devices: []DeviceIO,
     interpreter: *const Interpreter,
-    output: @import("io/uinput.zig").OutputDevice,
+    output: OutputDevice,
     mapper: ?*mapper_mod.Mapper = null,
-    aux_output: ?@import("io/uinput.zig").AuxOutputDevice = null,
-    touchpad_output: ?@import("io/uinput.zig").TouchpadOutputDevice = null,
+    aux_output: ?AuxOutputDevice = null,
+    touchpad_output: ?TouchpadOutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
     mapping_config: ?*const MappingConfig = null,
@@ -149,9 +152,8 @@ pub const EventLoop = struct {
     /// Init without creating a signalfd — for use under Supervisor.
     /// Signals are managed by the Supervisor; the EventLoop exits only via stop_pipe or disconnect.
     pub fn initManaged() !EventLoop {
-        const EFD_CLOEXEC: u32 = 0o2000000;
-        const EFD_NONBLOCK: u32 = 0o4000;
-        const efd = try posix.eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        const ioctl = @import("io/ioctl_constants.zig");
+        const efd = try posix.eventfd(0, ioctl.EFD_CLOEXEC | ioctl.EFD_NONBLOCK);
         errdefer posix.close(efd);
         return initWithSigFd(efd);
     }
@@ -316,7 +318,7 @@ pub const EventLoop = struct {
                     if (n == 0) break;
 
                     const interface_id: u8 = @intCast(i);
-                    const maybe_delta: ?@import("core/interpreter.zig").GamepadStateDelta = blk: {
+                    const maybe_delta: ?GamepadStateDelta = blk: {
                         if (ctx.wasm_plugin) |wp| {
                             if (ctx.wasm_override_report) {
                                 var out_buf: [64]u8 = undefined;
@@ -401,8 +403,8 @@ test "EventLoop: Disconnected device causes loop to exit without panic" {
 
     // Noop OutputDevice
     const NoopOutput = struct {
-        fn emit(_: *anyopaque, _: @import("core/state.zig").GamepadState) anyerror!void {}
-        fn pollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
+        fn emit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+        fn pollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
             return null;
         }
         fn close(_: *anyopaque) void {}
@@ -424,11 +426,12 @@ test "EventLoop: Disconnected device causes loop to exit without panic" {
         \\interface = 0
         \\size = 1
     ;
-    const parsed_dev = try @import("config/device.zig").parseString(allocator, interp_toml);
+    const config_device = @import("config/device.zig");
+    const parsed_dev = try config_device.parseString(allocator, interp_toml);
     defer parsed_dev.deinit();
     const interp = Interpreter.init(&parsed_dev.value);
 
-    var devs = [_]@import("io/device_io.zig").DeviceIO{dev};
+    var devs = [_]DeviceIO{dev};
     const ctx = EventLoopContext{
         .devices = &devs,
         .interpreter = &interp,
@@ -568,8 +571,8 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
             .poll_ff = mockPollFf,
             .close = mockClose,
         };
-        fn mockEmit(_: *anyopaque, _: state.GamepadState) anyerror!void {}
-        fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
+        fn mockEmit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+        fn mockPollFf(_: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
             return null;
         }
         fn mockClose(_: *anyopaque) void {}
@@ -710,9 +713,9 @@ const MockFfOutput = struct {
         .close = mockClose,
     };
 
-    fn mockEmit(_: *anyopaque, _: state.GamepadState) anyerror!void {}
+    fn mockEmit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
 
-    fn mockPollFf(ptr: *anyopaque) anyerror!?uinput.FfEvent {
+    fn mockPollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
         const self: *MockFfOutput = @ptrCast(@alignCast(ptr));
         if (self.call_count == 0) {
             self.call_count += 1;
