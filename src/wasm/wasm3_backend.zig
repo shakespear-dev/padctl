@@ -332,3 +332,107 @@ pub const Wasm3Plugin = struct {
         return d;
     }
 };
+
+// --- tests ---
+
+const testing = std.testing;
+
+fn testCreate() !struct { plugin: WasmPlugin, self: *Wasm3Plugin } {
+    const plugin = try Wasm3Plugin.create(testing.allocator);
+    return .{ .plugin = plugin, .self = @ptrCast(@alignCast(plugin.ptr)) };
+}
+
+test "wasm3: load echo plugin succeeds" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    const self = t.self;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+    try testing.expect(self.env != null);
+    try testing.expect(self.rt != null);
+}
+
+test "wasm3: initDevice returns true" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+    try testing.expect(plugin.initDevice());
+}
+
+test "wasm3: processReport echo round-trip" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+    const input = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    var out: [4]u8 = undefined;
+    const result = plugin.processReport(&input, &out);
+    try testing.expectEqual(ProcessResult.passthrough, result);
+    try testing.expectEqualSlices(u8, &input, &out);
+}
+
+test "wasm3: no exports returns false/passthrough" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/no_exports.wasm"), &ctx);
+    try testing.expect(!plugin.initDevice());
+    var out: [4]u8 = undefined;
+    const result = plugin.processReport(&[_]u8{ 0x01, 0x02, 0x03, 0x04 }, &out);
+    try testing.expectEqual(ProcessResult.passthrough, result);
+}
+
+test "wasm3: invalid wasm bytes returns error" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try testing.expectError(error.InvalidModule, plugin.load(&[_]u8{ 0xDE, 0xAD }, &ctx));
+}
+
+test "wasm3: unload then destroy lifecycle" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    const self = t.self;
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+    plugin.unload();
+    try testing.expect(self.env == null);
+    try testing.expect(self.rt == null);
+    plugin.destroy(testing.allocator);
+}
+
+test "wasm3: processCalibration does not crash" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/echo_plugin.wasm"), &ctx);
+    plugin.processCalibration(&[_]u8{ 0x01, 0x02, 0x03, 0x04 });
+}
+
+test "wasm3: trap in processReport returns drop" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    const self = t.self;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(@embedFile("../../tests/wasm/trap_plugin.wasm"), &ctx);
+    var out: [4]u8 = undefined;
+    const result = plugin.processReport(&[_]u8{ 0x01, 0x02, 0x03, 0x04 }, &out);
+    try testing.expectEqual(ProcessResult.drop, result);
+    try testing.expectEqual(@as(u32, 1), self.trap_count);
+}

@@ -20,6 +20,10 @@ pub const cli = struct {
 pub const wasm = struct {
     pub const runtime = @import("wasm/runtime.zig");
     pub const host = @import("wasm/host.zig");
+    pub const wasm3_backend = if (@import("build_options").use_wasm)
+        @import("wasm/wasm3_backend.zig")
+    else
+        struct {};
 };
 
 pub const core = struct {

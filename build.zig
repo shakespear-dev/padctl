@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
 
     const wasm3_c_flags: []const []const u8 = &.{ "-std=c99", "-DDEBUG=0", "-Dd_m3HasWASI=0" };
 
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "use_wasm", use_wasm);
+
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     const toml_mod = toml_dep.module("toml");
 
@@ -20,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("toml", toml_mod);
+    exe_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, exe_mod, wasm3_c_flags);
 
     const exe = b.addExecutable(.{ .name = "padctl", .root_module = exe_mod });
@@ -38,6 +42,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     src_mod.addImport("toml", toml_mod);
+    src_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, src_mod, wasm3_c_flags);
 
     const debug_mod = b.createModule(.{
@@ -96,6 +101,7 @@ pub fn build(b: *std.Build) void {
     unit_mod.addImport("toml", toml_mod);
     unit_mod.addImport("analyse", capture_analyse_mod);
     unit_mod.addImport("toml_gen", capture_toml_gen_mod);
+    unit_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, unit_mod, wasm3_c_flags);
     const unit_tests = b.addTest(.{ .root_module = unit_mod });
     if (use_libusb) {
@@ -118,6 +124,7 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addImport("toml", toml_mod);
     tsan_mod.addImport("analyse", capture_analyse_mod);
     tsan_mod.addImport("toml_gen", capture_toml_gen_mod);
+    tsan_mod.addImport("build_options", build_opts.createModule());
     if (use_wasm) addWasm3(b, tsan_mod, wasm3_c_flags);
     const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
     if (use_libusb) {

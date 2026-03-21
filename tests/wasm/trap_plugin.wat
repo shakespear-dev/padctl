@@ -1,0 +1,11 @@
+(module
+  (import "env" "log" (func $log (param i32 i32 i32)))
+  (import "env" "set_state" (func $set_state (param i32 i32 i32 i32)))
+  (import "env" "get_state" (func $get_state (param i32 i32 i32 i32) (result i32)))
+  (import "env" "device_read" (func $device_read (param i32 i32 i32) (result i32)))
+  (import "env" "device_write" (func $device_write (param i32 i32) (result i32)))
+  (import "env" "get_config" (func $get_config (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (export "process_report" (func $report))
+  (func $report (param i32 i32 i32 i32) (result i32) unreachable)
+)
