@@ -69,6 +69,20 @@ pub const EventLoop = struct {
         const sig_fd = try posix.signalfd(-1, &mask, 0);
         errdefer posix.close(sig_fd);
 
+        return initWithSigFd(sig_fd);
+    }
+
+    /// Init without creating a signalfd — for use under Supervisor.
+    /// Signals are managed by the Supervisor; the EventLoop exits only via stop_pipe or disconnect.
+    pub fn initManaged() !EventLoop {
+        const EFD_CLOEXEC: u32 = 0o2000000;
+        const EFD_NONBLOCK: u32 = 0o4000;
+        const efd = try posix.eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        errdefer posix.close(efd);
+        return initWithSigFd(efd);
+    }
+
+    fn initWithSigFd(sig_fd: posix.fd_t) !EventLoop {
         const pfds = try posix.pipe2(.{ .NONBLOCK = true });
         const stop_r = pfds[0];
         const stop_w = pfds[1];
@@ -94,7 +108,7 @@ pub const EventLoop = struct {
             .last_ts = std.time.nanoTimestamp(),
         };
 
-        // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = timerfd
+        // slot 0 = signalfd (or dummy pipe), slot 1 = stop pipe, slot 2 = timerfd
         loop.pollfds[0] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[1] = .{ .fd = stop_r, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[2] = .{ .fd = timer_fd, .events = posix.POLL.IN, .revents = 0 };

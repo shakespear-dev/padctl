@@ -37,8 +37,10 @@ pub const config = struct {
 pub const event_loop = @import("event_loop.zig");
 pub const init_seq = @import("init.zig");
 pub const device_instance = @import("device_instance.zig");
+pub const supervisor = @import("supervisor.zig");
 
 const DeviceInstance = device_instance.DeviceInstance;
+const Supervisor = supervisor.Supervisor;
 const Interpreter = core.interpreter.Interpreter;
 const DeviceIO = io.device_io.DeviceIO;
 
@@ -125,13 +127,23 @@ pub fn main() !void {
     };
     defer parsed.deinit();
 
-    var inst = DeviceInstance.init(allocator, &parsed.value) catch |err| {
+    const inst = DeviceInstance.init(allocator, &parsed.value) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };
-    defer inst.deinit();
 
-    try inst.run();
+    var sv = Supervisor.init(allocator) catch |err| {
+        std.log.err("failed to init supervisor: {}", .{err});
+        std.process.exit(1);
+    };
+    defer sv.deinit();
+
+    sv.addInstance(inst, &parsed.value) catch |err| {
+        std.log.err("failed to add instance: {}", .{err});
+        std.process.exit(1);
+    };
+
+    try sv.run();
 }
 
 test {

@@ -99,7 +99,7 @@ pub const DeviceInstance = struct {
             }
         }
 
-        var loop = try EventLoop.init();
+        var loop = try EventLoop.initManaged();
         errdefer loop.deinit();
 
         for (devices) |dev| try loop.addDevice(dev);
