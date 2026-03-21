@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const posix = std.posix;
 
+const h = @import("helpers.zig");
 const mapping = @import("../config/mapping.zig");
 const mapper_mod = @import("../core/mapper.zig");
 const state_mod = @import("../core/state.zig");
@@ -25,22 +26,12 @@ const Macro = macro_mod.Macro;
 const MacroPlayer = macro_player_mod.MacroPlayer;
 const TimerQueue = timer_queue_mod.TimerQueue;
 
-const KEY_B: u16 = 48;
-const KEY_LEFT: u16 = 105;
-const KEY_LEFTSHIFT: u16 = 42;
+const KEY_B = h.KEY_B;
+const KEY_LEFT = h.KEY_LEFT;
+const KEY_LEFTSHIFT = h.KEY_LEFTSHIFT;
 
-fn btnMask(id: ButtonId) u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(id)));
-}
-
-fn makeMapper(toml_str: []const u8, allocator: std.mem.Allocator) !struct {
-    parsed: mapping.ParseResult,
-    mapper: Mapper,
-} {
-    const parsed = try mapping.parseString(allocator, toml_str);
-    const m = try Mapper.init(&parsed.value, posix.STDIN_FILENO, allocator);
-    return .{ .parsed = parsed, .mapper = m };
-}
+const btnMask = h.btnMask;
+const makeMapper = h.makeMapper;
 
 const minimal_device_toml =
     \\[device]

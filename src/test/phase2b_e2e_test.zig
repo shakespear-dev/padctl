@@ -4,7 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const mapping = @import("../config/mapping.zig");
+const h = @import("helpers.zig");
 const mapper_mod = @import("../core/mapper.zig");
 const state_mod = @import("../core/state.zig");
 const uinput = @import("../io/uinput.zig");
@@ -18,21 +18,11 @@ const AuxEvent = mapper_mod.AuxEvent;
 const ButtonId = state_mod.ButtonId;
 const FfEvent = uinput.FfEvent;
 
-const REL_X: u16 = 0;
-const REL_Y: u16 = 1;
+const REL_X = h.REL_X;
+const REL_Y = h.REL_Y;
 
-fn btnMask(id: ButtonId) u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(id)));
-}
-
-fn makeMapper(toml_str: []const u8, allocator: std.mem.Allocator) !struct {
-    parsed: mapping.ParseResult,
-    mapper: Mapper,
-} {
-    const parsed = try mapping.parseString(allocator, toml_str);
-    const m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, allocator);
-    return .{ .parsed = parsed, .mapper = m };
-}
+const btnMask = h.btnMask;
+const makeMapper = h.makeMapper;
 
 // --- FF rumble pipeline (L1 via fillTemplate + UinputDevice mock) ---
 

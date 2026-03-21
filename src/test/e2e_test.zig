@@ -167,44 +167,7 @@ const pipeline_toml =
 
 const GamepadStateDelta = state_mod.GamepadStateDelta;
 
-const MockOutput = struct {
-    allocator: std.mem.Allocator,
-    emitted: std.ArrayList(GamepadState),
-    diffs: std.ArrayList(GamepadStateDelta),
-    prev: GamepadState = .{},
-
-    fn init(allocator: std.mem.Allocator) MockOutput {
-        return .{ .allocator = allocator, .emitted = .{}, .diffs = .{} };
-    }
-
-    fn deinit(self: *MockOutput) void {
-        self.emitted.deinit(self.allocator);
-        self.diffs.deinit(self.allocator);
-    }
-
-    fn outputDevice(self: *MockOutput) uinput.OutputDevice {
-        return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    const vtable = uinput.OutputDevice.VTable{
-        .emit = mockEmit,
-        .poll_ff = mockPollFf,
-        .close = mockClose,
-    };
-
-    fn mockEmit(ptr: *anyopaque, s: GamepadState) anyerror!void {
-        const self: *MockOutput = @ptrCast(@alignCast(ptr));
-        try self.diffs.append(self.allocator, s.diff(self.prev));
-        try self.emitted.append(self.allocator, s);
-        self.prev = s;
-    }
-
-    fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
-        return null;
-    }
-
-    fn mockClose(_: *anyopaque) void {}
-};
+const MockOutput = @import("mock_output.zig").MockOutput;
 
 fn makeFrame(left_x: i16, left_y_raw: i16, buttons_byte: u8, lt: u8) [32]u8 {
     var raw = [_]u8{0} ** 32;

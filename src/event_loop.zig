@@ -531,45 +531,7 @@ test "EventLoop timerfd: mapper.onTimerExpired invoked on timer expiry" {
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 }
 
-// MockOutput for event loop integration test — records diffs between consecutive emits
-const MockOutput = struct {
-    allocator: std.mem.Allocator,
-    emitted: std.ArrayList(state.GamepadState),
-    diffs: std.ArrayList(state.GamepadStateDelta),
-    prev: state.GamepadState = .{},
-
-    fn init(allocator: std.mem.Allocator) MockOutput {
-        return .{ .allocator = allocator, .emitted = .{}, .diffs = .{} };
-    }
-
-    fn deinit(self: *MockOutput) void {
-        self.emitted.deinit(self.allocator);
-        self.diffs.deinit(self.allocator);
-    }
-
-    fn outputDevice(self: *MockOutput) uinput.OutputDevice {
-        return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    const vtable = uinput.OutputDevice.VTable{
-        .emit = mockEmit,
-        .poll_ff = mockPollFf,
-        .close = mockClose,
-    };
-
-    fn mockEmit(ptr: *anyopaque, s: state.GamepadState) anyerror!void {
-        const self: *MockOutput = @ptrCast(@alignCast(ptr));
-        try self.diffs.append(self.allocator, s.diff(self.prev));
-        try self.emitted.append(self.allocator, s);
-        self.prev = s;
-    }
-
-    fn mockPollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
-        return null;
-    }
-
-    fn mockClose(_: *anyopaque) void {}
-};
+const MockOutput = @import("test/mock_output.zig").MockOutput;
 
 // Minimal DeviceConfig + Interpreter for event loop tests
 const device_mod = @import("config/device.zig");

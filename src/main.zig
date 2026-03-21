@@ -47,6 +47,8 @@ pub const io = struct {
 
 pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
+    pub const mock_output = @import("test/mock_output.zig");
+    pub const helpers = @import("test/helpers.zig");
     pub const e2e_test = @import("test/e2e_test.zig");
     pub const phase2a_e2e_test = @import("test/phase2a_e2e_test.zig");
     pub const phase2b_e2e_test = @import("test/phase2b_e2e_test.zig");
@@ -447,44 +449,7 @@ test "parseHexBytes via init_seq" {
 
 // --- T9c Layer 1 integration tests ---
 
-const MockOutput = struct {
-    allocator: std.mem.Allocator,
-    emitted: std.ArrayList(core.state.GamepadState),
-    diffs: std.ArrayList(core.state.GamepadStateDelta),
-    prev: core.state.GamepadState = .{},
-
-    fn init(allocator: std.mem.Allocator) MockOutput {
-        return .{ .allocator = allocator, .emitted = .{}, .diffs = .{} };
-    }
-
-    fn deinit(self: *MockOutput) void {
-        self.emitted.deinit(self.allocator);
-        self.diffs.deinit(self.allocator);
-    }
-
-    fn outputDevice(self: *MockOutput) io.uinput.OutputDevice {
-        return .{ .ptr = self, .vtable = &vtable };
-    }
-
-    const vtable = io.uinput.OutputDevice.VTable{
-        .emit = mockEmit,
-        .poll_ff = mockPollFf,
-        .close = mockClose,
-    };
-
-    fn mockEmit(ptr: *anyopaque, s: core.state.GamepadState) anyerror!void {
-        const self: *MockOutput = @ptrCast(@alignCast(ptr));
-        try self.diffs.append(self.allocator, s.diff(self.prev));
-        try self.emitted.append(self.allocator, s);
-        self.prev = s;
-    }
-
-    fn mockPollFf(_: *anyopaque) anyerror!?io.uinput.FfEvent {
-        return null;
-    }
-
-    fn mockClose(_: *anyopaque) void {}
-};
+const MockOutput = testing_support.mock_output.MockOutput;
 
 const pipeline_toml =
     \\[device]

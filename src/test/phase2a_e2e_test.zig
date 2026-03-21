@@ -7,7 +7,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const mapping = @import("../config/mapping.zig");
+const h = @import("helpers.zig");
 const mapper_mod = @import("../core/mapper.zig");
 const layer_mod = @import("../core/layer.zig");
 const state_mod = @import("../core/state.zig");
@@ -17,29 +17,18 @@ const AuxEvent = mapper_mod.AuxEvent;
 const ButtonId = state_mod.ButtonId;
 const GamepadStateDelta = state_mod.GamepadStateDelta;
 
-// Linux input codes (from linux/input-event-codes.h)
-const REL_X: u16 = 0;
-const REL_Y: u16 = 1;
-const BTN_LEFT: u16 = 272;
-const KEY_UP: u16 = 103;
-const KEY_DOWN: u16 = 108;
-const KEY_LEFT: u16 = 105;
-const KEY_RIGHT: u16 = 106;
-const KEY_F1: u16 = 59;
-const KEY_F13: u16 = 183;
+const REL_X = h.REL_X;
+const REL_Y = h.REL_Y;
+const BTN_LEFT = h.BTN_LEFT;
+const KEY_UP = h.KEY_UP;
+const KEY_DOWN = h.KEY_DOWN;
+const KEY_LEFT = h.KEY_LEFT;
+const KEY_RIGHT = h.KEY_RIGHT;
+const KEY_F1 = h.KEY_F1;
+const KEY_F13 = h.KEY_F13;
 
-fn btnMask(id: ButtonId) u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(id)));
-}
-
-fn makeMapper(toml_str: []const u8, allocator: std.mem.Allocator) !struct {
-    parsed: mapping.ParseResult,
-    mapper: Mapper,
-} {
-    const parsed = try mapping.parseString(allocator, toml_str);
-    const m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, allocator);
-    return .{ .parsed = parsed, .mapper = m };
-}
+const btnMask = h.btnMask;
+const makeMapper = h.makeMapper;
 
 // --- 1. Layer hold switch ---
 
