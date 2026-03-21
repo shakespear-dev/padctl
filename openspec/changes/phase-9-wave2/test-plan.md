@@ -18,11 +18,6 @@ Each test maps to a success criterion in `brief.md`.
 - [ ] TP4: **32-bit cross-4-byte** — `raw = [0x01, 0x02, 0x03, 0x04, 0x05]`,
   `extractBits(raw, 0, 0, 32)` = `0x04030201`. Validates maximum bit_count.
 
-- [ ] TP5: **32-bit with start_bit=1 spanning 5 bytes** — `raw = [0xFF; 5]`,
-  `extractBits(raw, 0, 1, 32)` reads 5 bytes, shifts right 1, masks 32 bits = `0xFFFFFFFF`.
-  Validates max span (start_bit + bit_count requires ceil((1+32)/8) = 5 bytes, but ADR-009
-  limits to 4 bytes). This should be caught at config validation, not at runtime.
-
 - [ ] TP6: **signed extension 12-bit** — raw value `0xFFF` (12 bits all 1),
   `signExtend(0xFFF, 12)` = `-1`. Validates sign extension for negative values.
 
@@ -59,11 +54,21 @@ Each test maps to a success criterion in `brief.md`.
 - [ ] TP16: **bits invalid bit_length=33** — `f = { bits = [0, 0, 33] }`.
   Returns `error.InvalidConfig`.
 
-- [ ] TP17: **bits with signed type** — `f = { bits = [0, 0, 12], bits_type = "signed" }`.
+- [ ] TP17: **bits with signed type** — `f = { bits = [0, 0, 12], type = "signed" }`.
   Parses and validates without error.
 
-- [ ] TP18: **bits with invalid type** — `f = { bits = [0, 0, 12], bits_type = "float" }`.
+- [ ] TP18: **bits with invalid type** — `f = { bits = [0, 0, 12], type = "float" }`.
   Returns `error.InvalidConfig`.
+
+- [ ] TP5: **bits exceeding 4-byte span rejected** — `f = { bits = [0, 1, 32] }` in report
+  size 8. `ceil((1+32)/8) = 5` bytes needed, exceeds ADR-009 4-byte max.
+  Returns `error.InvalidConfig`. (Bounds check catches this at validation, not runtime.)
+
+- [ ] TP-BWC: **backward compatibility — existing offset+type fields parse after struct change** —
+  Parse a TOML with `left_x = { offset = 3, type = "i16le" }` after `FieldConfig.offset` and
+  `FieldConfig.type` become optional (`?i64`, `?[]const u8`). Validates without error,
+  `field.offset == 3`, `field.type == "i16le"`. Confirms zig-toml promotes present values to
+  non-null.
 
 ## Unit Tests: Interpreter Touchpad Fields (in `src/core/interpreter.zig`)
 
@@ -71,7 +76,7 @@ Each test maps to a success criterion in `brief.md`.
   `touch0_x = { bits = [2, 0, 12] }`, raw = `[0x00, 0x00, 0xAB, 0x0C, ...]`,
   `processReport` returns `delta.touch0_x == 0x0CAB & 0xFFF`.
 
-- [ ] TP20: **signed bits field** — Config with `f = { bits = [0, 0, 12], bits_type = "signed" }`,
+- [ ] TP20: **signed bits field** — Config with `f = { bits = [0, 0, 12], type = "signed" }`,
   raw value = `0xFFF`. Returned value = `-1` (sign-extended).
 
 - [ ] TP21: **touch active field** — Config with `touch0_active = { bits = [10, 3, 1] }`,

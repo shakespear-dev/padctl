@@ -39,29 +39,37 @@ Within each task, sub-steps are sequential.
 
 ### T4b: Config parser bits variant
 
-- [ ] In `src/config/device.zig`, add optional `bits` and `bits_type` to `FieldConfig`:
+- [ ] In `src/config/device.zig`, make `offset` and `type` optional, add `bits`:
   ```zig
   pub const FieldConfig = struct {
       offset: ?i64 = null,        // existing, now optional
       type: ?[]const u8 = null,   // existing, now optional
       bits: ?[]const i64 = null,
-      bits_type: ?[]const u8 = null,
       transform: ?[]const u8 = null,
   };
   ```
-  Note: `offset` and `type` become optional (nullable). Existing TOML files that always
-  provide both are unaffected — zig-toml treats present values as non-null.
+  The `type` field is context-dependent per ADR-009:
+  - When `bits` absent: byte-aligned type tag (`"u8"`, `"i16le"`, etc.)
+  - When `bits` present: signedness (`"unsigned"` | `"signed"`), default unsigned if omitted
+
+  `offset` and `type` become optional (nullable). Existing TOML files that always provide
+  both are unaffected — zig-toml promotes present values to non-null.
+
+  **Breaking change note**: `validate()` currently calls `fieldTypeSize(field.type)` unconditionally
+  (line 192). With `type` now `?[]const u8`, this must be guarded with a null check — only call
+  `fieldTypeSize` when `bits` is absent and `type` carries a byte-aligned type tag.
 
 - [ ] Update `validate()` to handle `bits` fields:
   - If `field.bits != null`:
     - Assert `field.bits.len == 3`, else `error.InvalidConfig`
-    - Assert `field.offset == null and field.type == null`, else `error.InvalidConfig`
+    - Assert `field.offset == null`, else `error.InvalidConfig` (mutual exclusivity)
     - Validate `bits[1]` in [0,7], `bits[2]` in [1,32]
     - Bounds check: `bits[0] + ceil((bits[1] + bits[2]) / 8) <= report.size`
-    - If `field.bits_type != null`: must be `"unsigned"` or `"signed"`
+    - If `field.type != null`: must be `"unsigned"` or `"signed"` (signedness context)
   - If `field.bits == null`:
     - Assert `field.offset != null and field.type != null`, else `error.InvalidConfig`
-    - Existing validation (fieldTypeSize, offset bounds)
+    - Existing validation: `fieldTypeSize(field.type.?)`, offset bounds
+  - Guard `fieldTypeSize` call with null check on `field.type` (currently unconditional at line 192)
 
 - [ ] Update `fieldTypeSize` usage: skip for `bits` fields (no byte-aligned type)
 
@@ -93,7 +101,7 @@ Within each task, sub-steps are sequential.
     - `byte_offset = @intCast(field.bits[0])`
     - `start_bit = @intCast(field.bits[1])`
     - `bit_count = @intCast(field.bits[2])`
-    - `is_signed = if (field.bits_type) |t| std.mem.eql(u8, t, "signed") else false`
+    - `is_signed = if (field.type) |t| std.mem.eql(u8, t, "signed") else false`
     - `type_tag` unused, set to `.u8` (default)
   - Else: existing `offset + type` path, `mode = .standard`
 
@@ -207,6 +215,8 @@ Within each task, sub-steps are sequential.
   - `UI_SET_EVBIT(EV_ABS)`, `UI_SET_EVBIT(EV_KEY)`
   - `UI_SET_ABSBIT` for `ABS_MT_SLOT`, `ABS_MT_TRACKING_ID`, `ABS_MT_POSITION_X`, `ABS_MT_POSITION_Y`
   - `UI_SET_KEYBIT(BTN_TOUCH)`
+  - `UI_SET_PROPBIT(INPUT_PROP_POINTER)` — prerequisite: add `UI_SET_PROPBIT` to
+    `src/io/ioctl_constants.zig` as `_IOW('U', 110, c_int)`
   - `UI_ABS_SETUP` for each ABS with appropriate min/max/fuzz/flat
   - `uinput_setup` with name, `BUS_VIRTUAL`
   - `UI_DEV_CREATE`
@@ -272,9 +282,8 @@ Within each task, sub-steps are sequential.
   Byte 10 bit3 = L3_touch (left pad contact), bit4 = R3_touch (right pad contact).
   Value 1 = finger touching, maps directly to `touch0_active = true`.
 
-- [ ] Remove L3_touch/R3_touch from `button_group.map` (they are now touchpad active flags,
-  not buttons). If they should remain as buttons too, keep them in button_group and also
-  declare as bits fields -- the interpreter processes both independently.
+  Note: L3_touch/R3_touch are referenced in the `steam-deck.toml` header comment but are
+  NOT present in `button_group.map`. No removal needed — only add the new `bits` fields above.
 
 ### T7c: Add touchpad output section
 

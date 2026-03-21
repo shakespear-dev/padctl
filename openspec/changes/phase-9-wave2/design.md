@@ -62,13 +62,20 @@ pub const FieldConfig = struct {
     offset: ?i64 = null,
     type: ?[]const u8 = null,
     bits: ?[]const i64 = null,    // NEW: [byte_offset, start_bit, bit_length]
-    bits_type: ?[]const u8 = null, // NEW: "unsigned" | "signed"
     transform: ?[]const u8 = null,
 };
 ```
 
-A field uses either `offset + type` (existing) or `bits` (new), never both. Validation enforces
-mutual exclusivity.
+The `type` field is context-dependent per ADR-009:
+- When `bits` is absent: `type` carries a byte-aligned type tag (`"u8"`, `"i16le"`, etc.)
+- When `bits` is present: `type` carries signedness (`"unsigned"` | `"signed"`), default unsigned
+
+A field uses either (`offset` + `type`) or (`bits` + optional `type` for signedness), never both.
+Validation enforces mutual exclusivity:
+- If `bits` is present: `offset` must be null; `type` if present must be `"unsigned"` or `"signed"`
+- If `bits` is absent: both `offset` and `type` must be non-null
+- `validate()` must guard `fieldTypeSize(field.type)` with a null check — only called when
+  `bits` is absent and `type` carries a byte-aligned type tag
 
 ### Config Validation (extended)
 
@@ -80,9 +87,13 @@ Add to `validate()` in `device.zig`:
   - `bits[1] >= 0 and bits[1] <= 7` (start_bit)
   - `bits[2] >= 1 and bits[2] <= 32` (bit_length)
   - `bits[0] + ceil((bits[1] + bits[2]) / 8) <= report.size` (bounds check)
-  - `bits_type` is null, `"unsigned"`, or `"signed"`
-- If `bits` is present, `offset` and `type` must be null (mutual exclusivity)
-- If `offset` is present, `bits` must be null
+  - `type` is null, `"unsigned"`, or `"signed"` (signedness context)
+- If `bits` is present, `offset` must be null (mutual exclusivity)
+- If `bits` is absent:
+  - `offset` and `type` must both be non-null
+  - Existing validation: `fieldTypeSize(field.type.?)`, offset bounds check
+- `validate()` must null-check `field.type` before calling `fieldTypeSize` —
+  with `type` now optional, the unconditional dereference at line 192 must be guarded
 
 ### CompiledField Extension
 
@@ -91,22 +102,24 @@ Add to `validate()` in `device.zig`:
 ```zig
 const CompiledField = struct {
     tag: FieldTag,
-    mode: union(enum) {
-        standard: struct {
-            type_tag: FieldType,
-            offset: usize,
-        },
-        bits: struct {
-            byte_offset: u16,
-            start_bit: u3,
-            bit_count: u6,
-            is_signed: bool,
-        },
-    },
+    mode: enum { standard, bits },
+    // standard mode
+    type_tag: FieldType,
+    offset: usize,
+    // bits mode
+    byte_offset: u16,
+    start_bit: u3,
+    bit_count: u6,
+    is_signed: bool,
+    // common
     transforms: CompiledTransformChain,
     has_transform: bool,
 };
 ```
+
+Using flat fields with a mode enum tag avoids union complexity. Unused fields are zero-initialized.
+`CompiledField` is an internal struct (no TOML parsing), so flat layout is simpler than a tagged
+union and consistent with the existing struct style.
 
 `extractAndFillCompiled` switches on `mode`:
 - `.standard` -> existing `readFieldByTag` path
@@ -190,9 +203,11 @@ This uses pure bits DSL without device-specific logic in the interpreter.
 
 The `touch0_active` field can be declared two ways:
 
-1. **Via bits DSL** (preferred): `touch0_active = { bits = [33, 7, 1], transform = "negate" }`
-   - bit7=1 means inactive; `negate` flips it; interpreter sees `0` or `1`
+1. **Via bits DSL** (preferred): `touch0_active = { bits = [33, 7, 1], transform = "invert_bool" }`
+   - bit7=1 means inactive; `invert_bool` maps 1->0 and 0->1; interpreter sees correct boolean
    - No device-specific logic in interpreter (P2)
+   - Note: `negate` (-val) does NOT work here — it turns 1 into -1, which is still truthy.
+     `invert_bool` is a new transform added for active-low boolean fields.
 
 2. **Via contact byte**: `touch0_contact = { offset = 33, type = "u8" }` with interpreter doing `(val & 0x80) == 0`
    - Puts device knowledge in interpreter; violates P2
@@ -369,10 +384,10 @@ DualSense touchpad fields will use `bits` DSL in a future update:
 ```toml
 touch0_x = { bits = [34, 0, 12] }
 touch0_y = { bits = [35, 4, 12] }
-touch0_active = { bits = [33, 7, 1], transform = "negate" }
+touch0_active = { bits = [33, 7, 1], transform = "invert_bool" }
 touch1_x = { bits = [38, 0, 12] }
 touch1_y = { bits = [39, 4, 12] }
-touch1_active = { bits = [37, 7, 1], transform = "negate" }
+touch1_active = { bits = [37, 7, 1], transform = "invert_bool" }
 ```
 
 This is not part of T7 scope (Steam Deck only).
@@ -390,3 +405,5 @@ This is not part of T7 scope (Steam Deck only).
 | D5 | `touch0_active` via `bits` DSL, not interpreter-hardcoded | P2: interpreter has no device-specific logic. Protocol knowledge stays in TOML. |
 | D6 | Steam Deck touch active from button bitfield bits, not separate bytes | Steam Deck protocol: L3_touch/R3_touch are button bits, not separate fields. Reuse existing button byte range via `bits` DSL. |
 | D7 | `TouchpadOutputDevice` vtable, not direct `TouchpadDevice` coupling | P9: Layer 1 tests inject `MockTouchpadOutput`, no `/dev/uinput` dependency. |
+| D8 | `type` field is context-dependent (ADR-009 naming) | When `bits` absent: byte-aligned type (`"u8"`, `"i16le"`). When `bits` present: signedness (`"unsigned"` \| `"signed"`). Avoids a separate `bits_type` field and stays consistent with ADR-009. |
+| D9 | New `invert_bool` transform for active-low boolean fields | `negate` (-val) turns 1 into -1, still truthy. `invert_bool` maps 1->0, 0->1. Required for DualSense `touch0_active` where bit7=1 means inactive. |
