@@ -35,14 +35,11 @@ pub const config = struct {
 
 pub const event_loop = @import("event_loop.zig");
 pub const init_seq = @import("init.zig");
+pub const device_instance = @import("device_instance.zig");
 
-const DeviceIO = io.device_io.DeviceIO;
-const DeviceConfig = config.device.DeviceConfig;
-const InterfaceConfig = config.device.InterfaceConfig;
-const HidrawDevice = io.hidraw.HidrawDevice;
-const UsbrawDevice = io.usbraw.UsbrawDevice;
-const EventLoop = event_loop.EventLoop;
+const DeviceInstance = device_instance.DeviceInstance;
 const Interpreter = core.interpreter.Interpreter;
+const DeviceIO = io.device_io.DeviceIO;
 
 const VERSION = "0.1.0";
 
@@ -94,53 +91,6 @@ fn printHelp() void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, help) catch 0;
 }
 
-fn createDeviceIO(
-    allocator: std.mem.Allocator,
-    iface: InterfaceConfig,
-    vid: u16,
-    pid: u16,
-) !DeviceIO {
-    if (std.mem.eql(u8, iface.class, "hid")) {
-        const path = try HidrawDevice.discover(allocator, vid, pid, @intCast(iface.id));
-        defer allocator.free(path);
-        var dev = try allocator.create(HidrawDevice);
-        dev.* = HidrawDevice.init(allocator);
-        try dev.open(path);
-        dev.grabAssociatedEvdev(path) catch |err| {
-            std.log.warn("grabAssociatedEvdev failed: {}", .{err});
-        };
-        return dev.deviceIO();
-    } else if (std.mem.eql(u8, iface.class, "vendor")) {
-        const ep_in: u8 = @intCast(iface.ep_in orelse return error.MissingEndpoint);
-        const ep_out: u8 = @intCast(iface.ep_out orelse return error.MissingEndpoint);
-        const dev = try UsbrawDevice.open(allocator, vid, pid, @intCast(iface.id), ep_in, ep_out);
-        return dev.deviceIO();
-    }
-    return error.UnknownInterfaceClass;
-}
-
-fn openDeviceWithRetry(
-    allocator: std.mem.Allocator,
-    iface: InterfaceConfig,
-    vid: u16,
-    pid: u16,
-) !DeviceIO {
-    const delays = [_]u64{ 1, 2, 4 };
-    var attempt: usize = 0;
-    while (true) {
-        return createDeviceIO(allocator, iface, vid, pid) catch |err| {
-            if (attempt >= delays.len) {
-                std.log.err("failed to open interface {d} after retries: {}", .{ iface.id, err });
-                return err;
-            }
-            std.log.warn("open interface {d} failed ({}), retrying in {}s...", .{ iface.id, err, delays[attempt] });
-            std.Thread.sleep(delays[attempt] * std.time.ns_per_s);
-            attempt += 1;
-            continue;
-        };
-    }
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -152,7 +102,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // --validate mode: load + validate config, exit 0/1
+    // --validate mode: parse config and exit
     if (cli.validate_path) |path| {
         const result = config.device.parseFile(allocator, path) catch |err| {
             std.log.err("invalid config: {}", .{err});
@@ -173,52 +123,14 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer parsed.deinit();
-    const cfg = &parsed.value;
 
-    const vid: u16 = @intCast(cfg.device.vid);
-    const pid: u16 = @intCast(cfg.device.pid);
-
-    // Open one DeviceIO per interface
-    var devices = try allocator.alloc(DeviceIO, cfg.device.interface.len);
-    defer allocator.free(devices);
-
-    for (cfg.device.interface, 0..) |iface, i| {
-        devices[i] = try openDeviceWithRetry(allocator, iface, vid, pid);
-    }
-    defer for (devices) |dev| dev.close();
-
-    // Run init handshake on all interfaces if config provides one
-    if (cfg.device.init) |init_cfg| {
-        for (devices) |dev| {
-            init_seq.runInitSequence(allocator, dev, init_cfg) catch |err| {
-                std.log.err("init handshake failed: {}", .{err});
-                std.process.exit(1);
-            };
-        }
-    }
-
-    // Set up interpreter and event loop
-    const interp = Interpreter.init(cfg);
-
-    const output_cfg = cfg.output orelse {
-        std.log.err("config missing [output] section", .{});
+    var inst = DeviceInstance.init(allocator, &parsed.value) catch |err| {
+        std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };
-    var uinput_dev = io.uinput.UinputDevice.create(&output_cfg) catch |err| {
-        std.log.err("failed to create uinput device: {}", .{err});
-        std.process.exit(1);
-    };
-    defer uinput_dev.close();
-    const output = uinput_dev.outputDevice();
+    defer inst.deinit();
 
-    var loop = try EventLoop.init();
-    defer loop.deinit();
-
-    for (devices) |dev| {
-        try loop.addDevice(dev);
-    }
-
-    try loop.run(devices, &interp, output, null, null, allocator, cfg);
+    try inst.run();
 }
 
 test {
