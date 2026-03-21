@@ -66,6 +66,12 @@ The USB-format approach (Report ID 0x02, 63 zero bytes) is simpler and avoids CR
 Per `hid-playstation.c`, the DualSense firmware accepts USB output reports over BT and triggers
 mode switch regardless of report format.
 
+### Read Buffer Size Note
+
+`sendAndWaitPrefix` uses a 64-byte read buffer. DualSense BT extended report is 78 bytes,
+so the read is truncated. This is acceptable: the prefix check only needs byte 0 (`0x31`),
+which is always within the first 64 bytes. The truncated tail bytes are not used during init.
+
 ### runInitSequence Behavior
 
 `runInitSequence` with `commands = []` and `enable = "02 00..."`:
@@ -101,7 +107,7 @@ similar to DualSense with key differences:
 | 2 | 1 | left_y | u8 |
 | 3 | 1 | right_x | u8 |
 | 4 | 1 | right_y | u8 |
-| 5 | 4 | buttons[4] | bitfield |
+| 5 | 3 | buttons[3] | bitfield |
 | 9 | 1 | L2 trigger | u8 |
 | 10 | 1 | R2 trigger | u8 |
 | 11 | 2 | timestamp | u16le |
@@ -358,6 +364,17 @@ actual report interpretation instead of the declarative interpreter.
 
 The existing button/stick field declarations serve as fallback if the WASM plugin is
 unavailable (graceful degradation: raw 8-bit sticks instead of calibrated 12-bit).
+
+### D-Pad Encoding: Individual Bits to Hat Output
+
+The existing `switch-pro.toml` maps D-Pad as individual bits in `button_group`
+(`DPadDown=16, DPadUp=17, DPadRight=18, DPadLeft=19`), while `[output.dpad]` declares
+`type = "hat"`. This is by design: the engine's output layer converts individual D-Pad
+button states to a hat value when emitting to uinput. The `button_group` captures raw bit
+positions from the input report; the `[output.dpad] type = "hat"` instructs the output layer
+to synthesize `ABS_HAT0X`/`ABS_HAT0Y` from the four directional button states. When WASM
+`process_report` takes over, D-Pad bits are passed through unchanged — the same output-layer
+hat conversion applies.
 
 ### What Stays in TOML
 

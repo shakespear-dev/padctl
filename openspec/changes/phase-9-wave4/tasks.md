@@ -38,6 +38,8 @@ Within each task, sub-steps are sequential.
   - `enable = "02 00..."`: sends 63-byte USB output report
   - `response_prefix = [0x31]`: waits for BT extended report
   - Up to 10 retries at 5ms intervals
+  - Note: `sendAndWaitPrefix` uses a 64-byte read buffer, which truncates the 78-byte
+    BT extended report. This is acceptable — the prefix check only reads byte 0 (`0x31`).
 
 - [ ] Verify existing `init.zig` tests still pass unchanged
 

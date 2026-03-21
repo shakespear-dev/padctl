@@ -55,12 +55,14 @@ Within each task, sub-steps are sequential.
 ### T17c: armDebounce helper
 
 - [ ] Add `armDebounce` method to Supervisor:
-  - `timerfd_settime(debounce_fd, 0, { .it_value = { .nsec = 500_000_000 } }, null)`
+  - `linux.timerfd_settime(debounce_fd, .{}, &spec, null)` — use `linux` namespace
+    consistently (timerfd_settime is in `std.os.linux`, not `posix`; same pattern as
+    `event_loop.zig`)
   - Re-arming a running timer resets the countdown (timerfd semantics)
 
 ### T17d: Config dir path resolution
 
-- [ ] Accept config dir path as parameter to `Supervisor.init()` or `run()`
+- [ ] Accept config dir path as parameter to `Supervisor.init()` (not `run()`)
 - [ ] Default: `$XDG_CONFIG_HOME/padctl/` or `~/.config/padctl/`
 - [ ] If directory doesn't exist: skip inotify setup (`inotify_fd = -1`)
 

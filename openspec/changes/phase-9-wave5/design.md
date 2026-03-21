@@ -35,6 +35,10 @@ config_dir: []const u8,        // watched directory path (owned)
 
 #### Init
 
+Config dir path is accepted as a parameter to `Supervisor.init()` (alongside existing
+allocator and config parameters). The inotify watch is created during init, consistent
+with how `netlink_fd` and `hup_fd` are set up in the same init path.
+
 ```zig
 // In Supervisor.init(), after hup_fd setup:
 const inotify_fd = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
@@ -206,6 +210,13 @@ BT report uses the same layout at offset 54:
 ```toml
 battery_level = { bits = [54, 0, 4] }  # BT: battery at byte 54
 ```
+
+#### DualSense Touch Contact Fields
+
+`dualsense.toml` 中 `touch0_contact` / `touch1_contact` 仍使用 `type = "u8"` 而非 bits DSL。
+DualSense 触摸板的 contact 字段布局 (bit7=inactive, bits[6:0]=finger ID) 与 battery level
+的简单 nibble 提取不同 — 需要同时提取 active 标志位和 finger ID 两个语义字段。当 DualSense
+触摸板支持正式实现时 (不在 Wave 5 范围内), 将统一迁移到 bits DSL。
 
 #### Output Device Impact
 
