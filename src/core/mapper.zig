@@ -106,12 +106,18 @@ pub const Mapper = struct {
 
         // [3] mode processing
         var suppress_dpad_hat: bool = false;
+        var suppress_right_stick_gyro: bool = false;
+        var gyro_joy_x: ?i16 = null;
+        var gyro_joy_y: ?i16 = null;
         {
             const gcfg = self.effectiveGyroConfig();
             const gout = self.gyro_proc.process(&gcfg, self.state.gyro_x, self.state.gyro_y, self.state.gyro_z);
             if (std.mem.eql(u8, gcfg.mode, "mouse")) {
                 if (gout.rel_x != 0) aux.append(.{ .rel = .{ .code = 0, .value = gout.rel_x } }) catch {};
                 if (gout.rel_y != 0) aux.append(.{ .rel = .{ .code = 1, .value = gout.rel_y } }) catch {};
+            } else if (std.mem.eql(u8, gcfg.mode, "joystick")) {
+                if (gout.joy_x) |jx| { gyro_joy_x = jx; suppress_right_stick_gyro = true; }
+                if (gout.joy_y) |jy| { gyro_joy_y = jy; suppress_right_stick_gyro = true; }
             }
 
             const left_cfg = self.effectiveStickConfig(.left);
@@ -188,6 +194,12 @@ pub const Mapper = struct {
             emit_state.dpad_y = 0;
         }
 
+        // gyro joystick mode: override right stick axes, suppress originals
+        if (suppress_right_stick_gyro) {
+            if (gyro_joy_x) |jx| emit_state.rx = jx;
+            if (gyro_joy_y) |jy| emit_state.ry = jy;
+        }
+
         // suppress stick axes when mode != gamepad
         const left_cfg = self.effectiveStickConfig(.left);
         const right_cfg = self.effectiveStickConfig(.right);
@@ -195,7 +207,7 @@ pub const Mapper = struct {
             emit_state.ax = 0;
             emit_state.ay = 0;
         }
-        if (right_cfg.suppress_gamepad or !std.mem.eql(u8, right_cfg.mode, "gamepad")) {
+        if (!suppress_right_stick_gyro and (right_cfg.suppress_gamepad or !std.mem.eql(u8, right_cfg.mode, "gamepad"))) {
             emit_state.rx = 0;
             emit_state.ry = 0;
         }
@@ -683,4 +695,71 @@ test "dpad prev mask: suppress_dpad_hat applied to masked_prev" {
     // Frame 2: same dpad — masked_prev should also have dpad_y = 0
     const ev2 = try m.apply(.{ .dpad_x = 0, .dpad_y = -1 });
     try testing.expectEqual(@as(i8, 0), ev2.prev.dpad_y);
+}
+
+test "gyro joystick mode: overrides emit_state.rx/ry, suppresses original axes" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "joystick"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Feed large gyro input so joy_x/joy_y are non-zero
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 5000, .ry = 5000 });
+
+    // rx/ry must be gyro-derived (not the raw 5000)
+    try testing.expect(ev.gamepad.rx != 5000);
+    try testing.expect(ev.gamepad.ry != 5000);
+    // No aux REL events from gyro (joystick mode emits no mouse events)
+    for (ev.aux.slice()) |e| {
+        switch (e) {
+            .rel => return error.UnexpectedRelEvent,
+            else => {},
+        }
+    }
+}
+
+test "gyro joystick mode: null joy_x does not touch rx" {
+    const allocator = testing.allocator;
+    // mode=off → process() returns joy_x=null, joy_y=null
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "off"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const ev = try m.apply(.{ .rx = 1234, .ry = -1234 });
+    // mode=off: no override, axes pass through unchanged
+    try testing.expectEqual(@as(i16, 1234), ev.gamepad.rx);
+    try testing.expectEqual(@as(i16, -1234), ev.gamepad.ry);
+}
+
+test "gyro mouse mode: joy_x/y do not affect emit_state axes" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[gyro]
+        \\mode = "mouse"
+        \\sensitivity_x = 1000.0
+        \\sensitivity_y = 1000.0
+        \\smoothing = 0.0
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const ev = try m.apply(.{ .gyro_x = 10000, .gyro_y = 10000, .rx = 999, .ry = 888 });
+    // mouse mode: rx/ry must be untouched (suppress_right_stick_gyro stays false)
+    try testing.expectEqual(@as(i16, 999), ev.gamepad.rx);
+    try testing.expectEqual(@as(i16, 888), ev.gamepad.ry);
 }
