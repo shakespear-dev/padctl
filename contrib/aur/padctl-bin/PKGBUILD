@@ -38,4 +38,6 @@ package() {
     while IFS= read -r -d '' toml; do
         install -Dm644 "${toml}" "${pkgdir}/usr/share/padctl/${toml#${_src}/}"
     done < <(find "${_src}/devices" -name '*.toml' -print0)
+
+    install -Dm644 "${_src}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }
