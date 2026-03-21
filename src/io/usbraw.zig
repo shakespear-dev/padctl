@@ -253,3 +253,37 @@ test "RingBuffer wraps around correctly" {
     try std.testing.expectEqual(@as(u8, 0xBB), out[0]);
     try std.testing.expectEqual(@as(usize, 0), rb.count);
 }
+
+test "RingBuffer concurrent push/pop" {
+    var ring = RingBuffer{};
+    var push_count: usize = 0;
+
+    const producer = try std.Thread.spawn(.{}, struct {
+        fn run(r: *RingBuffer, count: *usize) void {
+            var buf: [32]u8 = undefined;
+            for (0..1000) |i| {
+                std.mem.writeInt(u32, buf[0..4], @intCast(i), .little);
+                r.push(buf[0..32]);
+                count.* += 1;
+            }
+        }
+    }.run, .{ &ring, &push_count });
+
+    var last_seen: u32 = 0;
+    var pop_count: usize = 0;
+    var out: [64]u8 = undefined;
+    while (pop_count < 900) {
+        const n = ring.pop(&out);
+        if (n > 0) {
+            const val = std.mem.readInt(u32, out[0..4], .little);
+            try std.testing.expect(val >= last_seen);
+            last_seen = val;
+            pop_count += 1;
+        } else {
+            // yield to let producer make progress
+            std.Thread.yield() catch {};
+        }
+    }
+
+    producer.join();
+}
