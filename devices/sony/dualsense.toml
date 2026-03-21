@@ -92,6 +92,13 @@ range = [0, 74]
 seed = 0xa1
 expect = { offset = 74, type = "u32le" }
 
+# --- WASM plugin: IMU calibration via Feature Report 0x05 ---
+[wasm]
+plugin = "plugins/sony_imu_calibration.wasm"
+
+[wasm.overrides]
+process_report = true
+
 # --- Commands (USB Report ID 0x02, 63-byte output) ---
 # valid_flag0 = byte 1; valid_flag1 = byte 2
 # Rumble: set COMPATIBLE_VIBRATION (valid_flag0 bit 0 = 0x01)

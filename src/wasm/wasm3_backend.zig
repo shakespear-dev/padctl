@@ -461,3 +461,177 @@ test "wasm3: trap rate-limiting auto-unloads plugin" {
     const result = plugin.processReport(&input, &out);
     try testing.expectEqual(ProcessResult.passthrough, result);
 }
+
+// --- Sony IMU calibration plugin tests ---
+
+const imu_plugin_wasm = @embedFile("../../plugins/sony_imu_calibration.wasm");
+
+fn writeI16le(buf: []u8, offset: usize, val: i16) void {
+    const u: u16 = @bitCast(val);
+    buf[offset] = @truncate(u);
+    buf[offset + 1] = @truncate(u >> 8);
+}
+
+fn readI16le(buf: []const u8, offset: usize) i16 {
+    return @bitCast(@as(u16, buf[offset]) | (@as(u16, buf[offset + 1]) << 8));
+}
+
+// Build a synthetic Feature Report 0x05 (41 bytes) with known calibration values.
+// gyro pitch/yaw/roll plus/minus all symmetric: +1000/-1000 (denom=2000)
+// gyro_speed_plus=500, gyro_speed_minus=500 (speed_2x=1000)
+// accel x/y/z plus/minus: +4096/-4096 (denom=8192)
+//
+// Gyro params: numer = 1000*1024 = 1024000, denom = 2000
+// Accel params: bias = 4096 - 8192/2 = 0, numer = 2*8192 = 16384, denom = 8192
+fn buildCalibReport() [41]u8 {
+    var buf = [_]u8{0} ** 41;
+    buf[0] = 0x05; // report_id
+    // bytes 1-6: gyro bias (unused by kernel, set to 0)
+    // bytes 7-18: gyro axis plus/minus
+    writeI16le(&buf, 7, 1000); // gyro_pitch_plus
+    writeI16le(&buf, 9, -1000); // gyro_pitch_minus
+    writeI16le(&buf, 11, 1000); // gyro_yaw_plus
+    writeI16le(&buf, 13, -1000); // gyro_yaw_minus
+    writeI16le(&buf, 15, 1000); // gyro_roll_plus
+    writeI16le(&buf, 17, -1000); // gyro_roll_minus
+    // bytes 19-22: gyro speed
+    writeI16le(&buf, 19, 500); // gyro_speed_plus
+    writeI16le(&buf, 21, 500); // gyro_speed_minus
+    // bytes 23-34: accel plus/minus
+    writeI16le(&buf, 23, 4096); // accel_x_plus
+    writeI16le(&buf, 25, -4096); // accel_x_minus
+    writeI16le(&buf, 27, 4096); // accel_y_plus
+    writeI16le(&buf, 29, -4096); // accel_y_minus
+    writeI16le(&buf, 31, 4096); // accel_z_plus
+    writeI16le(&buf, 33, -4096); // accel_z_minus
+    return buf;
+}
+
+const MockDeviceCtx = struct {
+    calib_report: [41]u8,
+
+    fn deviceRead(ptr: *anyopaque, report_id: i32, buf: []u8) i32 {
+        if (report_id != 0x05 or buf.len < 41) return -1;
+        const self: *MockDeviceCtx = @ptrCast(@alignCast(ptr));
+        @memcpy(buf[0..41], &self.calib_report);
+        return 41;
+    }
+};
+
+test "imu_cal: init_device reads calibration via device_read" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var mock_dev = MockDeviceCtx{ .calib_report = buildCalibReport() };
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    ctx.device_ptr = &mock_dev;
+    ctx.device_read_fn = MockDeviceCtx.deviceRead;
+    try plugin.load(imu_plugin_wasm, &ctx);
+    try testing.expect(plugin.initDevice());
+
+    // Verify calibration state was stored by running process_report
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    writeI16le(&raw, 16, 10); // gyro_x
+    writeI16le(&raw, 22, 1000); // accel_x
+
+    var out: [64]u8 = undefined;
+    const result = plugin.processReport(&raw, &out);
+    switch (result) {
+        .override => {},
+        else => return error.ExpectedOverride,
+    }
+
+    // Gyro: 10 * 1024000 / 2000 = 5120
+    try testing.expectEqual(@as(i16, 5120), readI16le(&out, 16));
+    // Accel: 1000 * 16384 / 8192 = 2000
+    try testing.expectEqual(@as(i16, 2000), readI16le(&out, 22));
+}
+
+test "imu_cal: process_calibration path and calibrated output" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(imu_plugin_wasm, &ctx);
+
+    // Use process_calibration instead of init_device
+    const calib = buildCalibReport();
+    plugin.processCalibration(&calib);
+
+    // Use small raw values that won't overflow i16 after calibration.
+    // Gyro: numer=1024000, denom=2000 => scale=512x => max raw=+/-63 for i16 range
+    // Accel: numer=16384, denom=8192 => scale=2x, bias=0
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    writeI16le(&raw, 16, 10); // gyro_x
+    writeI16le(&raw, 18, -20); // gyro_y
+    writeI16le(&raw, 20, 5); // gyro_z
+    writeI16le(&raw, 22, 1000); // accel_x
+    writeI16le(&raw, 24, -500); // accel_y
+    writeI16le(&raw, 26, 100); // accel_z
+    // Non-IMU byte to verify copy-through
+    raw[1] = 0xAB;
+
+    var out: [64]u8 = undefined;
+    const result = plugin.processReport(&raw, &out);
+    switch (result) {
+        .override => {},
+        else => return error.ExpectedOverride,
+    }
+
+    // Gyro: calibrated = raw * 1024000 / 2000 = raw * 512
+    try testing.expectEqual(@as(i16, 10 * 512), readI16le(&out, 16)); // 5120
+    try testing.expectEqual(@as(i16, -20 * 512), readI16le(&out, 18)); // -10240
+    try testing.expectEqual(@as(i16, 5 * 512), readI16le(&out, 20)); // 2560
+
+    // Accel: calibrated = (raw - 0) * 16384 / 8192 = raw * 2
+    try testing.expectEqual(@as(i16, 2000), readI16le(&out, 22));
+    try testing.expectEqual(@as(i16, -1000), readI16le(&out, 24));
+    try testing.expectEqual(@as(i16, 200), readI16le(&out, 26));
+
+    // Non-IMU bytes preserved
+    try testing.expectEqual(@as(u8, 0x01), out[0]);
+    try testing.expectEqual(@as(u8, 0xAB), out[1]);
+}
+
+test "imu_cal: zero denominator fallback" {
+    const t = try testCreate();
+    const plugin = t.plugin;
+    defer plugin.destroy(testing.allocator);
+    var ctx = HostContext.init(testing.allocator);
+    defer ctx.deinit();
+    try plugin.load(imu_plugin_wasm, &ctx);
+
+    // Build calib with zero denominator: plus == minus
+    var calib = [_]u8{0} ** 41;
+    calib[0] = 0x05;
+    // All gyro plus/minus = 0 => denom = 0 => fallback
+    // gyro_speed_plus/minus = 0 too
+    // All accel plus/minus = 0 => denom = 0 => fallback
+    plugin.processCalibration(&calib);
+
+    // Gyro fallback: numer=GYRO_RANGE(2097152), denom=32767
+    // Accel fallback: numer=ACC_RANGE(32768), denom=32767, bias=0
+    var raw = [_]u8{0} ** 64;
+    raw[0] = 0x01;
+    writeI16le(&raw, 16, 100); // gyro_x
+    writeI16le(&raw, 22, 100); // accel_x
+
+    var out: [64]u8 = undefined;
+    const result = plugin.processReport(&raw, &out);
+    switch (result) {
+        .override => {},
+        else => return error.ExpectedOverride,
+    }
+
+    // Gyro fallback: 100 * 2097152 / 32767 = 6400 (truncated integer division)
+    const gyro_expected: i16 = @intCast(@divTrunc(@as(i64, 100) * 2097152, 32767));
+    try testing.expectEqual(gyro_expected, readI16le(&out, 16));
+
+    // Accel fallback: 100 * 32768 / 32767 = 100 (near 1:1 mapping)
+    const accel_expected: i16 = @intCast(@divTrunc(@as(i64, 100) * 32768, 32767));
+    try testing.expectEqual(accel_expected, readI16le(&out, 22));
+}
