@@ -50,11 +50,6 @@ Cross-referenced: source files `validate_e2e_test.zig`, `cli_e2e_test.zig`.
 
 No blocking issues found.
 
-Minor observation: design.md says "All three arrays contain the same 5 devices. 7+ newer
-devices have zero coverage." — the actual count of newer devices is exactly 7 (12 total - 5
-original = 7). The "7+" phrasing is slightly imprecise but not incorrect since more devices
-may be added before implementation.
-
 ## Verdict
 
 **PASS** — spec is ready for implementation. No blocking issues.
