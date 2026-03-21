@@ -49,13 +49,15 @@ pub const testing_support = struct {
     pub const mock_device_io = @import("test/mock_device_io.zig");
     pub const mock_output = @import("test/mock_output.zig");
     pub const helpers = @import("test/helpers.zig");
-    pub const e2e_test = @import("test/e2e_test.zig");
-    pub const phase2a_e2e_test = @import("test/phase2a_e2e_test.zig");
-    pub const phase2b_e2e_test = @import("test/phase2b_e2e_test.zig");
-    pub const phase2c_e2e_test = @import("test/phase2c_e2e_test.zig");
-    pub const phase3_e2e_test = @import("test/phase3_e2e_test.zig");
-    pub const phase4_e2e_test = @import("test/phase4_e2e_test.zig");
-    pub const phase6_e2e_test = @import("test/phase6_e2e_test.zig");
+    pub const interpreter_e2e_test = @import("test/interpreter_e2e_test.zig");
+    pub const mapper_e2e_test = @import("test/mapper_e2e_test.zig");
+    pub const gyro_stick_e2e_test = @import("test/gyro_stick_e2e_test.zig");
+    pub const macro_e2e_test = @import("test/macro_e2e_test.zig");
+    pub const capture_e2e_test = @import("test/capture_e2e_test.zig");
+    pub const supervisor_e2e_test = @import("test/supervisor_e2e_test.zig");
+    pub const wasm_e2e_test = @import("test/wasm_e2e_test.zig");
+    pub const validate_e2e_test = @import("test/validate_e2e_test.zig");
+    pub const cli_e2e_test = @import("test/cli_e2e_test.zig");
 };
 
 pub const config = struct {
