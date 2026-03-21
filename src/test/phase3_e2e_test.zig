@@ -310,7 +310,7 @@ test "T5: attach — one instance created, thread running" {
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     const inst = try makeInstance(allocator, &mock, &parsed.value);
@@ -331,7 +331,7 @@ test "T5: attach duplicate devname — no-op, still one instance" {
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     const inst_a = try makeInstance(allocator, &mock_a, &parsed.value);
@@ -361,7 +361,7 @@ test "T5: detach — instance stopped and freed" {
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     const inst = try makeInstance(allocator, &mock, &parsed.value);
@@ -375,7 +375,7 @@ test "T5: detach — instance stopped and freed" {
 test "T5: detach unknown devname — no panic" {
     const allocator = testing.allocator;
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     sup.detach("hidraw99"); // must not panic
@@ -392,7 +392,7 @@ test "T5: attach-detach-attach — second instance created normally" {
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     const inst_a = try makeInstance(allocator, &mock_a, &parsed.value);

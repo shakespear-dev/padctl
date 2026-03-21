@@ -75,6 +75,24 @@ pub const Supervisor = struct {
         };
     }
 
+    pub fn initForTest(allocator: std.mem.Allocator) !Supervisor {
+        const EFD_CLOEXEC: u32 = 0o2000000;
+        const EFD_NONBLOCK: u32 = 0o4000;
+        const stop_fd = try posix.eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        errdefer posix.close(stop_fd);
+        const hup_fd = try posix.eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        errdefer posix.close(hup_fd);
+        return .{
+            .allocator = allocator,
+            .managed = .{},
+            .stop_fd = stop_fd,
+            .hup_fd = hup_fd,
+            .netlink_fd = -1,
+            .configs = .{},
+            .devname_map = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+
     pub fn deinit(self: *Supervisor) void {
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
@@ -507,7 +525,7 @@ test "Supervisor: SIGHUP updates mapping without restarting instance" {
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
     defer mock_a.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.spawnInstance("usb-1-1", inst);
@@ -540,7 +558,7 @@ test "Supervisor: SIGHUP with new phys_key spawns new instance" {
     defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const entry_a = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
     const entry_b = ConfigEntry{ .phys_key = "usb-1-2", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
@@ -569,7 +587,7 @@ test "Supervisor: SIGHUP with removed phys_key stops instance" {
     defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const entry_a = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
 
@@ -602,7 +620,7 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
 
     var mock_a = try MockDeviceIO.init(allocator, &.{});
     defer mock_a.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.spawnInstance("usb-1-1", inst);
@@ -631,7 +649,7 @@ test "Supervisor: empty config dir → zero instances" {
     const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(tmp_path);
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
@@ -648,7 +666,7 @@ test "Supervisor: dir with no toml files → zero instances" {
 
     try tmp.dir.writeFile(.{ .sub_path = "readme.txt", .data = "hello" });
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
@@ -666,7 +684,7 @@ test "Supervisor: two toml files, no matching hidraw → zero instances" {
     try tmp.dir.writeFile(.{ .sub_path = "a.toml", .data = minimal_device_toml });
     try tmp.dir.writeFile(.{ .sub_path = "b.toml", .data = minimal_device_toml });
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
@@ -683,7 +701,7 @@ test "Supervisor: duplicate attach devname — only one instance created" {
     defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst);
@@ -707,7 +725,7 @@ test "Supervisor: duplicate attach devname — only one instance created" {
 test "Supervisor: detach unknown devname — no panic" {
     const allocator = testing.allocator;
 
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
     defer sup.deinit();
 
     sup.detach("hidraw99");
@@ -724,7 +742,7 @@ test "Supervisor: attach-detach-attach same devname — new instance after re-at
     defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
@@ -752,7 +770,7 @@ test "Supervisor: two devnames attached simultaneously — independent threads" 
     defer mock_a.deinit();
     var mock_b = try MockDeviceIO.init(allocator, &.{});
     defer mock_b.deinit();
-    var sup = try Supervisor.init(allocator);
+    var sup = try Supervisor.initForTest(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
