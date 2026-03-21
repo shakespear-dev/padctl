@@ -5,31 +5,33 @@ Each test maps to a success criterion in `brief.md`.
 ## Unit Tests: Command Templates (in `src/core/command.zig`)
 
 - [ ] TP1: **adaptive_trigger_off template produces correct bytes** —
-  `fillTemplate(allocator, off_template, &.{})` where `off_template` is the 63-byte
+  `fillTemplate(allocator, off_template, &.{})` where `off_template` is the 63-token
   off template from `dualsense.toml`. Result byte 0 = `0x02` (report ID),
   byte 1 = `0x0c` (valid_flag0, bits 2+3 set), byte 11 = `0x00` (right mode = off),
   byte 22 = `0x00` (left mode = off). Total length = 63 bytes.
 
 - [ ] TP2: **adaptive_trigger_feedback fills position/strength** —
-  `fillTemplate(allocator, feedback_template, &params)` with params:
-  `r_position=40, r_strength=180, l_position=70, l_strength=200`.
-  Result: byte 11 = `0x01` (feedback mode), byte 12 = 40, byte 13 = 180,
-  byte 22 = `0x01`, byte 23 = 70, byte 24 = 200.
+  `fillTemplate(allocator, feedback_template, &params)` with params using `<< 8` encoding:
+  `r_position=40<<8, r_strength=180<<8, l_position=70<<8, l_strength=200<<8`.
+  Result (63 bytes): byte 11 = `0x01` (feedback mode), byte 12 = 40, byte 13 = 180,
+  byte 22 = `0x01`, byte 23 = 70, byte 24 = 200. All other bytes = `0x00` (except
+  byte 0 = `0x02`, byte 1 = `0x0c`).
 
 - [ ] TP3: **adaptive_trigger_weapon fills start/end/strength** —
-  `fillTemplate(allocator, weapon_template, &params)` with params:
-  `r_start=40, r_end=160, r_strength=180, l_start=30, l_end=140, l_strength=200`.
-  Result: byte 11 = `0x02`, byte 12 = 40, byte 13 = 160, byte 14 = 180,
+  `fillTemplate(allocator, weapon_template, &params)` with params using `<< 8` encoding:
+  `r_start=40<<8, r_end=160<<8, r_strength=180<<8, l_start=30<<8, l_end=140<<8, l_strength=200<<8`.
+  Result (63 bytes): byte 11 = `0x02`, byte 12 = 40, byte 13 = 160, byte 14 = 180,
   byte 22 = `0x02`, byte 23 = 30, byte 24 = 140, byte 25 = 200.
 
 - [ ] TP4: **adaptive_trigger_vibration fills position/amplitude/frequency** —
-  `fillTemplate(allocator, vibration_template, &params)` with params:
-  `r_position=10, r_amplitude=255, r_frequency=30, l_position=10, l_amplitude=200, l_frequency=25`.
-  Result: byte 11 = `0x06`, byte 12 = 10, byte 13 = 255, byte 14 = 30,
+  `fillTemplate(allocator, vibration_template, &params)` with params using `<< 8` encoding:
+  `r_position=10<<8, r_amplitude=255<<8, r_frequency=30<<8, l_position=10<<8, l_amplitude=200<<8, l_frequency=25<<8`.
+  Result (63 bytes): byte 11 = `0x06`, byte 12 = 10, byte 13 = 255, byte 14 = 30,
   byte 22 = `0x06`, byte 23 = 10, byte 24 = 200, byte 25 = 25.
 
-- [ ] TP5: **all templates produce exactly 63 bytes** — for each of the 4 templates,
-  `fillTemplate` result length = 63.
+- [ ] TP5: **all templates produce exactly 63 bytes** — all 4 templates have exactly
+  63 tokens. For each template, `fillTemplate` result length = 63. This matches the
+  DualSense USB output report size (Report ID 0x02 + 62 data bytes).
 
 ## Unit Tests: Device Config Parse (in `src/config/device.zig`)
 
@@ -91,6 +93,12 @@ Each test maps to a success criterion in `brief.md`.
 - [ ] TP15: **invalid mode in layer returns error** — layer with
   `[layer.adaptive_trigger] mode = "invalid"`. `validate()` returns `error.InvalidConfig`.
 
+- [ ] TP15b: **missing params default to zero** — config with `mode = "feedback"` and
+  no `left`/`right` sections. `buildAdaptiveTriggerParams` produces all-zero param values
+  (`Param.value = 0`), which `fillTemplate` outputs as byte `0x00`. This is valid (sends
+  feedback mode with position=0 strength=0), though unlikely to be the user's intent.
+  Verify the output bytes are well-formed (63 bytes, mode bytes correct, param bytes = 0).
+
 ## Integration Tests: Resolution Pipeline (in `src/event_loop.zig`)
 
 - [ ] TP16: **round-trip: mapping → command → bytes** — construct `EventLoopContext` with:
@@ -98,8 +106,8 @@ Each test maps to a success criterion in `brief.md`.
   - Mapping config with `[adaptive_trigger] mode = "feedback"`, left position=70, strength=200,
     right position=40, strength=180
   - Mock `DeviceIO` that captures write calls
-  Call `applyAdaptiveTrigger`. Verify mock received 63-byte write with correct mode bytes
-  and param values at expected offsets.
+  Call `applyAdaptiveTrigger`. Verify mock received exactly 63-byte write with correct
+  mode bytes and param values at expected offsets (byte 11/22 = mode, byte 12-13/23-24 = params).
 
 - [ ] TP17: **mode "off" sends off template** — mapping with `mode = "off"` or absent
   adaptive_trigger. `applyAdaptiveTrigger` sends the off template (mode bytes = 0x00).

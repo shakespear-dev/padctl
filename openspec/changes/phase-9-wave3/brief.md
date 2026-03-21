@@ -40,6 +40,7 @@ This wave adds:
 - Per-game automatic profile switching (T18 deleted — VIOLATION P5)
 - Adaptive trigger modes beyond Off/Feedback/Weapon/Vibration (DualSense only supports these 4)
 - DualShock 4 (no adaptive trigger hardware)
+- Bluetooth output report (Report ID 0x31) — BT has a different header structure and requires CRC32; this wave covers USB output (Report ID 0x02) only
 
 ## References
 

@@ -14,9 +14,9 @@
 
 ### DualSense Adaptive Trigger Protocol
 
-DualSense output report (USB Report ID 0x02, 63 bytes) uses bytes 22-32 for right trigger
-and bytes 33-43 for left trigger adaptive settings. The mode byte determines which subsequent
-bytes are interpreted.
+DualSense USB output report (Report ID 0x02, 63 bytes total: 1 byte report ID + 62 data bytes)
+uses bytes 11-21 for right trigger and bytes 22-32 for left trigger adaptive settings. The
+mode byte (byte 11 / byte 22) determines which subsequent param bytes are interpreted.
 
 However, the DualSense output report is a **single monolithic report** — all fields
 (rumble, LED, adaptive triggers) share the same 63-byte buffer. The `valid_flag0` (byte 1)
@@ -49,30 +49,31 @@ the second write to overwrite the first side's settings).
 
 ```toml
 # Adaptive trigger: Off (both triggers)
+# 63 bytes: Report ID 0x02 + 62 data bytes (DualSense USB output report)
 [commands.adaptive_trigger_off]
 interface = 3
 template = "02 0c 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
 
 # Adaptive trigger: Feedback — continuous resistance from position with given strength
-# Right: mode at byte 11, position at byte 12, strength at byte 13
-# Left:  mode at byte 22, position at byte 23, strength at byte 24
+# Right: mode 0x01 at byte 11, position at byte 12, strength at byte 13
+# Left:  mode 0x01 at byte 22, position at byte 23, strength at byte 24
 [commands.adaptive_trigger_feedback]
 interface = 3
-template = "02 0c 00 00 00 00 00 00 00 00 00 01 {r_position:u8} {r_strength:u8} 00 00 00 00 00 00 00 00 01 {l_position:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+template = "02 0c 00 00 00 00 00 00 00 00 00 01 {r_position:u8} {r_strength:u8} 00 00 00 00 00 00 00 00 01 {l_position:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
 
-# Adaptive trigger: Weapon — click at position with given strength, releases after end_position
-# Right: mode at byte 11, start at byte 12, end at byte 13, strength at byte 14
-# Left:  mode at byte 22, start at byte 23, end at byte 24, strength at byte 25
+# Adaptive trigger: Weapon — click at start position with given strength, releases after end
+# Right: mode 0x02 at byte 11, start at byte 12, end at byte 13, strength at byte 14
+# Left:  mode 0x02 at byte 22, start at byte 23, end at byte 24, strength at byte 25
 [commands.adaptive_trigger_weapon]
 interface = 3
-template = "02 0c 00 00 00 00 00 00 00 00 00 02 {r_start:u8} {r_end:u8} {r_strength:u8} 00 00 00 00 00 00 00 02 {l_start:u8} {l_end:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+template = "02 0c 00 00 00 00 00 00 00 00 00 02 {r_start:u8} {r_end:u8} {r_strength:u8} 00 00 00 00 00 00 00 02 {l_start:u8} {l_end:u8} {l_strength:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
 
 # Adaptive trigger: Vibration — motor vibration effect
-# Right: mode at byte 11, position at byte 12, amplitude at byte 13, frequency at byte 14
-# Left:  mode at byte 22, position at byte 23, amplitude at byte 24, frequency at byte 25
+# Right: mode 0x06 at byte 11, position at byte 12, amplitude at byte 13, frequency at byte 14
+# Left:  mode 0x06 at byte 22, position at byte 23, amplitude at byte 24, frequency at byte 25
 [commands.adaptive_trigger_vibration]
 interface = 3
-template = "02 0c 00 00 00 00 00 00 00 00 00 06 {r_position:u8} {r_amplitude:u8} {r_frequency:u8} 00 00 00 00 00 00 00 06 {l_position:u8} {l_amplitude:u8} {l_frequency:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+template = "02 0c 00 00 00 00 00 00 00 00 00 06 {r_position:u8} {r_amplitude:u8} {r_frequency:u8} 00 00 00 00 00 00 00 06 {l_position:u8} {l_amplitude:u8} {l_frequency:u8} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
 ```
 
 ### P6 Compliance
@@ -172,6 +173,11 @@ fn validateAdaptiveTrigger(at: *const AdaptiveTriggerConfig) !void {
 
 Call from `validate()` for both root-level and per-layer `adaptive_trigger` fields.
 
+Note: this is the first per-layer **output-config** validation in `mapping.zig`. Current
+`validate()` only checks input-side layer properties (activation mode, hold_timeout,
+duplicate names, macro refs). Adding adaptive trigger validation to the layer loop
+establishes the precedent for future per-layer output-config checks.
+
 ### P6 Compliance
 
 The mapping config contains only:
@@ -230,6 +236,13 @@ fn applyAdaptiveTrigger(
 `buildCommandName` prepends `"adaptive_trigger_"` to the mode string and returns a
 stack-allocated name. `buildAdaptiveTriggerParams` maps left/right params to the
 `r_*` and `l_*` placeholder names used in the templates.
+
+**Param.value encoding**: `fillTemplate` extracts the u8 output byte via `Param.value >> 8`
+(see `src/core/command.zig` line 35). This means `buildAdaptiveTriggerParams` must left-shift
+the i64 config values by 8 and truncate to u16 before storing in `Param.value`. For example,
+mapping config `position = 70` becomes `Param{ .name = "r_position", .value = 70 << 8 }`,
+which `fillTemplate` then outputs as byte value `(70 << 8) >> 8 = 70`. Without this shift,
+`position = 70` would produce byte value `0` (`70 >> 8 = 0`).
 
 ### Trigger Points
 

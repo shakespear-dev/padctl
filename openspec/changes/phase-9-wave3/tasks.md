@@ -32,7 +32,8 @@ Within each task, sub-steps are sequential.
   interface = 3
   template = "02 0c 00 ... 06 {r_position:u8} {r_amplitude:u8} {r_frequency:u8} ... 06 {l_position:u8} {l_amplitude:u8} {l_frequency:u8} ..."
   ```
-  Full templates in `design.md`. Each is a 63-byte USB output report with `valid_flag0 = 0x0c`
+  Full templates in `design.md`. Each template has exactly 63 tokens producing 63 bytes
+  (Report ID 0x02 + 62 data bytes = DualSense USB output report) with `valid_flag0 = 0x0c`
   (bits 2+3 = enable right+left trigger effects).
 
 - [ ] Add comments documenting the DualSense adaptive trigger byte layout:
