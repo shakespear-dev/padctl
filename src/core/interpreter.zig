@@ -1116,7 +1116,9 @@ test "T3: oversized report parsed without bounds error" {
     const interp = Interpreter.init(&parsed.value);
     // 128 bytes, magic correct — should match and parse normally
     var raw = [_]u8{0} ** 128;
-    raw[0] = 0x5a; raw[1] = 0xa5; raw[2] = 0xef;
+    raw[0] = 0x5a;
+    raw[1] = 0xa5;
+    raw[2] = 0xef;
     std.mem.writeInt(i16, raw[3..5], 100, .little);
     const result = try interp.processReport(1, &raw);
     try testing.expect(result != null);

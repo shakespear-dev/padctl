@@ -315,7 +315,9 @@ test "EventLoop: Disconnected device causes loop to exit without panic" {
     // Noop OutputDevice
     const NoopOutput = struct {
         fn emit(_: *anyopaque, _: @import("core/state.zig").GamepadState) anyerror!void {}
-        fn pollFf(_: *anyopaque) anyerror!?uinput.FfEvent { return null; }
+        fn pollFf(_: *anyopaque) anyerror!?uinput.FfEvent {
+            return null;
+        }
         fn close(_: *anyopaque) void {}
         const vtable = uinput.OutputDevice.VTable{ .emit = emit, .poll_ff = pollFf, .close = close };
     };
