@@ -204,7 +204,7 @@ test "T3: renderFrame — pressed button differs from released" {
     var fbs_off = std.io.fixedBufferStream(&buf_off);
 
     var gs_on = GamepadState{};
-    gs_on.buttons = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.A)));
+    gs_on.buttons = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.A)));
     var gs_off = GamepadState{};
 
     try render_mod.renderFrame(fbs_on.writer(), &gs_on, &[_]u8{}, false);

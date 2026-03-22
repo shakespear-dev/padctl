@@ -20,7 +20,7 @@ const ButtonId = state_mod.ButtonId;
 //   [5..6]  left_y  i16le (negate transform → stored negated)
 //   [7..8]  right_x i16le
 //   [9..10] right_y i16le (negate transform)
-//   [11..12] button_group source (2 bytes), bit 0 = A
+//   [11..14] button_group source (4 bytes), bit 4 = A
 //   [15]    lt u8
 //   [16]    rt u8
 //   [17..28] IMU fields
@@ -51,8 +51,8 @@ const vader5_toml =
     \\lt      = { offset = 15, type = "u8" }
     \\rt      = { offset = 16, type = "u8" }
     \\[report.button_group]
-    \\source = { offset = 11, size = 2 }
-    \\map = { A = 0, B = 1, X = 3, Y = 4, LB = 6, RB = 7, Select = 10, Start = 11, LS = 12, RS = 13, DPadDown = 14, DPadLeft = 15 }
+    \\source = { offset = 11, size = 4 }
+    \\map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Select = 6, X = 7, Y = 8, Start = 9, LB = 10, RB = 11, LS = 14, RS = 15, C = 16, Z = 17, M1 = 18, M2 = 19, M3 = 20, M4 = 21, LM = 22, RM = 23, O = 24, Home = 27 }
 ;
 
 fn makeIf1Sample() [32]u8 {
@@ -62,7 +62,7 @@ fn makeIf1Sample() [32]u8 {
     raw[2] = 0xef;
     std.mem.writeInt(i16, raw[3..5], 1000, .little); // left_x
     std.mem.writeInt(i16, raw[5..7], -500, .little); // left_y → after negate → 500
-    raw[11] = 0x01; // A = bit 0
+    raw[11] = 0x10; // A = bit 4
     raw[15] = 128; // lt
     return raw;
 }
@@ -83,8 +83,8 @@ test "Vader5 IF1: axes, button A, lt" {
     try testing.expectEqual(@as(?u8, 128), delta.lt);
 
     const btns = delta.buttons orelse return error.NoBtns;
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0);
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
 }
 
 test "Vader5 IF1: load from file and process" {
@@ -101,8 +101,8 @@ test "Vader5 IF1: load from file and process" {
     try testing.expectEqual(@as(?u8, 128), delta.lt);
 
     const btns = delta.buttons orelse return error.NoBtns;
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0);
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
 }
 
 test "Vader5 IF1: checksum mismatch suppresses emit" {
@@ -227,8 +227,8 @@ test "EventLoop pipeline: A press then release" {
 
     try testing.expect(out.diffs.items.len >= 2);
 
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const a_mask: u32 = @as(u32, 1) << a_bit;
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_bit;
 
     // First diff: buttons changed, A pressed
     const d0_btns = out.diffs.items[0].buttons orelse return error.NoDiff;

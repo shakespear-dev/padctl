@@ -315,7 +315,7 @@ pub const UinputDevice = struct {
         // Buttons: differential by bit
         const btn_fields = @typeInfo(state.ButtonId).@"enum".fields;
         inline for (btn_fields, 0..) |_, i| {
-            const mask: u32 = @as(u32, 1) << i;
+            const mask: u64 = @as(u64, 1) << i;
             const code = self.button_codes[i];
             if (code != 0) {
                 const curr_pressed = (s.buttons & mask) != 0;
@@ -864,7 +864,7 @@ test "emit: button change recorded" {
     s.buttons = 1; // ButtonId.A pressed
     try od.emit(s);
     try std.testing.expectEqual(@as(usize, 1), mock.emitted.items.len);
-    try std.testing.expectEqual(@as(u32, 1), mock.emitted.items[0].buttons);
+    try std.testing.expectEqual(@as(u64, 1), mock.emitted.items[0].buttons);
 }
 
 const MockAuxDevice = struct {

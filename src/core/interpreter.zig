@@ -476,14 +476,14 @@ fn extractAndFillCompiled(cr: *const CompiledReport, raw: []const u8, delta: *Ga
 
     if (cr.button_group) |*cbg| {
         const src_val = readUintBytes(raw, cbg.src_off, cbg.src_size);
-        var bits: u32 = delta.buttons orelse 0;
+        var bits: u64 = delta.buttons orelse 0;
         for (cbg.entries[0..cbg.count]) |entry| {
             const pressed = (src_val >> @intCast(entry.bit_idx)) & 1 == 1;
-            const btn_bit: u5 = @intCast(@intFromEnum(entry.btn_id));
+            const btn_bit: u6 = @intCast(@intFromEnum(entry.btn_id));
             if (pressed) {
-                bits |= @as(u32, 1) << btn_bit;
+                bits |= @as(u64, 1) << btn_bit;
             } else {
-                bits &= ~(@as(u32, 1) << btn_bit);
+                bits &= ~(@as(u64, 1) << btn_bit);
             }
         }
         delta.buttons = bits;
@@ -578,8 +578,8 @@ const vader5_toml =
     \\accel_z = { offset = 27, type = "i16le" }
     \\
     \\[report.button_group]
-    \\source = { offset = 11, size = 2 }
-    \\map = { A = 0, B = 1, X = 3, Y = 4, LB = 6, RB = 7, Select = 10, Start = 11, LS = 12, RS = 13, DPadDown = 14, DPadLeft = 15 }
+    \\source = { offset = 11, size = 4 }
+    \\map = { DPadUp = 0, DPadRight = 1, DPadDown = 2, DPadLeft = 3, A = 4, B = 5, Select = 6, X = 7, Y = 8, Start = 9, LB = 10, RB = 11, LS = 14, RS = 15, C = 16, Z = 17, M1 = 18, M2 = 19, M3 = 20, M4 = 21, LM = 22, RM = 23, O = 24, Home = 27 }
 ;
 
 const vader5_if0_toml =
@@ -638,9 +638,8 @@ fn makeIf1Sample() [32]u8 {
     std.mem.writeInt(i16, raw[7..9], 200, .little);
     // right_y = -300 → after negate → 300
     std.mem.writeInt(i16, raw[9..11], -300, .little);
-    // button_group: A=bit0, B=bit1 → byte[11]=0x03, byte[12]=0x00
-    raw[11] = 0x03;
-    raw[12] = 0x00;
+    // button_group: A=bit4, B=bit5 → byte[11]=0x30
+    raw[11] = 0x30;
     raw[15] = 128; // lt
     raw[16] = 64; // rt
     std.mem.writeInt(i16, raw[17..19], 100, .little); // gyro_x
@@ -671,12 +670,12 @@ test "IF1 sample: axes, buttons, IMU" {
     try testing.expectEqual(@as(?i16, -100), delta.accel_x);
     try testing.expectEqual(@as(?i16, -200), delta.accel_y);
     try testing.expectEqual(@as(?i16, -300), delta.accel_z);
-    // A=bit0, B=bit1 both pressed
+    // A=bit4, B=bit5 both pressed
     const btns = delta.buttons orelse return error.NoBtns;
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const b_bit: u5 = @intCast(@intFromEnum(ButtonId.B));
-    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0);
-    try testing.expect(btns & (@as(u32, 1) << b_bit) != 0);
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_bit: u6 = @intCast(@intFromEnum(ButtonId.B));
+    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
+    try testing.expect(btns & (@as(u64, 1) << b_bit) != 0);
 }
 
 test "match miss: wrong magic returns null" {
@@ -990,11 +989,11 @@ test "DualSense USB report: axes, triggers, IMU, buttons" {
     try testing.expectEqual(@as(?i16, -8192), delta.accel_z);
     // buttons: byte8 = 0x30 → bit4=Square(X), bit5=Cross(A)
     const btns = delta.buttons orelse return error.NoBtns;
-    const x_bit: u5 = @intCast(@intFromEnum(ButtonId.X));
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    try testing.expect(btns & (@as(u32, 1) << x_bit) != 0); // Square pressed
-    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0); // Cross pressed
-    try testing.expect(btns & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.B)))) == 0); // Circle not pressed
+    const x_bit: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    try testing.expect(btns & (@as(u64, 1) << x_bit) != 0); // Square pressed
+    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0); // Cross pressed
+    try testing.expect(btns & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.B)))) == 0); // Circle not pressed
 }
 
 test "DualSense right_y=0x00 wraps to -32768 via @truncate" {
@@ -1044,10 +1043,10 @@ test "DualSense L1+R1 simultaneously pressed" {
     raw[9] = 0x03;
     const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
     const btns = delta.buttons orelse return error.NoBtns;
-    const lb_bit: u5 = @intCast(@intFromEnum(ButtonId.LB));
-    const rb_bit: u5 = @intCast(@intFromEnum(ButtonId.RB));
-    try testing.expect(btns & (@as(u32, 1) << lb_bit) != 0);
-    try testing.expect(btns & (@as(u32, 1) << rb_bit) != 0);
+    const lb_bit: u6 = @intCast(@intFromEnum(ButtonId.LB));
+    const rb_bit: u6 = @intCast(@intFromEnum(ButtonId.RB));
+    try testing.expect(btns & (@as(u64, 1) << lb_bit) != 0);
+    try testing.expect(btns & (@as(u64, 1) << rb_bit) != 0);
 }
 
 test "DualSense all buttons released" {
@@ -1140,10 +1139,10 @@ test "DualSense BT report: axes, triggers, IMU, buttons, CRC32" {
     try testing.expectEqual(@as(?i16, -8192), delta.accel_z);
 
     const btns = delta.buttons orelse return error.NoBtns;
-    const x_bit: u5 = @intCast(@intFromEnum(ButtonId.X));
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    try testing.expect(btns & (@as(u32, 1) << x_bit) != 0);
-    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0);
+    const x_bit: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    try testing.expect(btns & (@as(u64, 1) << x_bit) != 0);
+    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0);
 }
 
 test "DualSense BT report: CRC32 mismatch returns error" {
@@ -1185,14 +1184,14 @@ test "button_group batch extraction" {
     const raw = [_]u8{ 0x01, 0x09, 0x00, 0x00 };
     const delta = (try interp.processReport(0, &raw)) orelse return error.NoMatch;
     const btns = delta.buttons orelse return error.NoBtns;
-    const a_bit: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const b_bit: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const x_bit: u5 = @intCast(@intFromEnum(ButtonId.X));
-    const y_bit: u5 = @intCast(@intFromEnum(ButtonId.Y));
-    try testing.expect(btns & (@as(u32, 1) << a_bit) != 0); // A pressed
-    try testing.expect(btns & (@as(u32, 1) << b_bit) == 0); // B not pressed
-    try testing.expect(btns & (@as(u32, 1) << x_bit) != 0); // X pressed
-    try testing.expect(btns & (@as(u32, 1) << y_bit) == 0); // Y not pressed
+    const a_bit: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_bit: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const x_bit: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const y_bit: u6 = @intCast(@intFromEnum(ButtonId.Y));
+    try testing.expect(btns & (@as(u64, 1) << a_bit) != 0); // A pressed
+    try testing.expect(btns & (@as(u64, 1) << b_bit) == 0); // B not pressed
+    try testing.expect(btns & (@as(u64, 1) << x_bit) != 0); // X pressed
+    try testing.expect(btns & (@as(u64, 1) << y_bit) == 0); // Y not pressed
 }
 
 const crc32_base_toml =

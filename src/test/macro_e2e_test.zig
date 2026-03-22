@@ -387,7 +387,7 @@ test "T7: hot-reload — updateMapping swaps config; next apply uses new mapping
     // With new mapping M1 = "KEY_A", active_macros must be empty.
     try testing.expectEqual(@as(usize, 0), m.active_macros.items.len);
     // M1 suppressed in gamepad output.
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & m1_mask);
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & m1_mask);
     // KEY_A in aux.
     const KEY_A: u16 = 30;
     var found_key_a = false;
