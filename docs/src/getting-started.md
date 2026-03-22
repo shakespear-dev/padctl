@@ -56,8 +56,8 @@ padctl --doc-gen devices/sony/dualsense.toml
 ## systemd Service
 
 ```sh
-# per-device instance
-sudo systemctl enable --now padctl@dualsense
+sudo padctl install
+sudo systemctl enable --now padctl.service
 ```
 
 ## udev Rule

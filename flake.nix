@@ -20,9 +20,10 @@
       packages = forAllSystems (system:
         let
           e = env system;
+          zigTarget = builtins.replaceStrings [ "-linux" ] [ "-linux-musl" ] system;
         in
         {
-          default = e.packageForTarget "x86_64-linux-musl" {
+          default = e.packageForTarget zigTarget {
             src = ./.;
             zigBuildFlags = [ "-Doptimize=ReleaseSafe" ];
             meta = {

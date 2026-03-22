@@ -135,7 +135,7 @@ fn tomlMatchesVidPid(allocator: std.mem.Allocator, path: []const u8, vid: u16, p
 }
 
 /// Extract the first occurrence of `key = 0x<hex>` or `key = <dec>` from TOML text.
-fn extractHexField(content: []const u8, key: []const u8) ?u16 {
+pub fn extractHexField(content: []const u8, key: []const u8) ?u16 {
     var pos: usize = 0;
     while (pos < content.len) {
         const idx = std.mem.indexOfPos(u8, content, pos, key) orelse break;

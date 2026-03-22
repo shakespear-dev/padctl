@@ -11,6 +11,12 @@ const service_content =
     \\PIDFile=/run/padctl.pid
     \\Restart=on-failure
     \\RestartSec=3
+    \\ProtectSystem=strict
+    \\ProtectHome=true
+    \\PrivateTmp=true
+    \\NoNewPrivileges=true
+    \\DeviceAllow=/dev/hidraw* rw
+    \\DeviceAllow=/dev/uinput rw
     \\
     \\[Install]
     \\WantedBy=multi-user.target

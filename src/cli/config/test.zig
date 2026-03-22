@@ -4,8 +4,10 @@ const linux = std.os.linux;
 const ioctl = @import("../../io/ioctl_constants.zig");
 const mapping_mod = @import("../../config/mapping.zig");
 const paths = @import("../../config/paths.zig");
+const scan_mod = @import("../scan.zig");
 
 const NAME_BUF_LEN = 128;
+const MAX_HIDRAW = 64;
 
 // HIDIOCGRAWNAME(128)
 const HIDIOCGRAWNAME: u32 = blk: {
@@ -18,14 +20,36 @@ const HIDIOCGRAWNAME: u32 = blk: {
     break :blk @as(u32, @bitCast(req));
 };
 
-fn openFirstHidraw(config_path: ?[]const u8) !posix.fd_t {
-    if (config_path) |p| {
-        // Try to infer device from config path — just scan and open first available
-        _ = p;
-    }
-    // Scan /dev/hidraw0..63 for first openable
+fn readVidPid(config_path: []const u8) !struct { vid: u16, pid: u16 } {
+    const content = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, config_path, 256 * 1024);
+    defer std.heap.page_allocator.free(content);
+    const vid = scan_mod.extractHexField(content, "vid") orelse return error.MissingVid;
+    const pid = scan_mod.extractHexField(content, "pid") orelse return error.MissingPid;
+    return .{ .vid = vid, .pid = pid };
+}
+
+fn openHidrawByVidPid(vid: u16, pid: u16) !posix.fd_t {
     var i: u8 = 0;
-    while (i < 64) : (i += 1) {
+    while (i < MAX_HIDRAW) : (i += 1) {
+        var path_buf: [32]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
+        const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
+
+        var info: ioctl.HidrawDevinfo = undefined;
+        if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) {
+            posix.close(fd);
+            continue;
+        }
+        if (@as(u16, @bitCast(info.vendor)) == vid and @as(u16, @bitCast(info.product)) == pid)
+            return fd;
+        posix.close(fd);
+    }
+    return error.NoMatchingDevice;
+}
+
+fn openFirstHidraw() !posix.fd_t {
+    var i: u8 = 0;
+    while (i < MAX_HIDRAW) : (i += 1) {
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/dev/hidraw{d}", .{i}) catch continue;
         const fd = posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true }, 0) catch continue;
@@ -54,9 +78,21 @@ pub fn run(allocator: std.mem.Allocator, config_path: ?[]const u8, mapping_path:
     };
     defer if (mapping) |m| m.deinit();
 
-    const fd = openFirstHidraw(config_path) catch |e| {
-        std.log.err("no hidraw device available: {}", .{e});
-        return e;
+    const fd = blk: {
+        if (config_path) |cp| {
+            const vp = readVidPid(cp) catch |e| {
+                std.log.err("failed to read VID/PID from '{s}': {}", .{ cp, e });
+                return e;
+            };
+            break :blk openHidrawByVidPid(vp.vid, vp.pid) catch |e| {
+                std.log.err("no hidraw device matching {x:0>4}:{x:0>4}: {}", .{ vp.vid, vp.pid, e });
+                return e;
+            };
+        }
+        break :blk openFirstHidraw() catch |e| {
+            std.log.err("no hidraw device available: {}", .{e});
+            return e;
+        };
     };
     defer posix.close(fd);
 
@@ -130,7 +166,7 @@ test "test: mappingLabel with no remap returns null" {
 
 test "test: openFirstHidraw returns error when no device" {
     // In CI there are no hidraw devices; ensure it returns an error cleanly.
-    const result = openFirstHidraw(null);
+    const result = openFirstHidraw();
     // May succeed or fail depending on environment; just ensure no panic.
     if (result) |fd| {
         posix.close(fd);
