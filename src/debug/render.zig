@@ -216,9 +216,9 @@ pub fn renderFrame(
         try writer.writeAll("│ RY:");
         try writer.print("{:>6}", .{gs.ry});
         try pad(writer, 11, CL);
-        // ├─ DPad ──────┤ = 15 visible, then 2 spaces into right col
-        try writer.writeAll("├─ DPad ──────┤  ");
-        var col: usize = CR_START + 2;
+        // ├─ DPad ───────┤ = CM+1 visible (┤ at CR_START), then 1 space
+        try writer.writeAll("├─ DPad ───────┤ ");
+        var col: usize = CR_START + 1;
         col += try btnLabel(writer, gs, .M1, "M1");
         try writer.writeAll(" ");
         col += 1;
