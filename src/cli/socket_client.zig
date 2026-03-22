@@ -1,0 +1,76 @@
+const std = @import("std");
+const posix = std.posix;
+const linux = std.os.linux;
+
+pub const DEFAULT_SOCKET_PATH = "/run/padctl/padctl.sock";
+
+pub const ConnectError = posix.SocketError || posix.ConnectError || error{PathTooLong};
+
+pub fn connectToSocket(path: []const u8) ConnectError!posix.fd_t {
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    errdefer posix.close(fd);
+
+    var addr: linux.sockaddr.un = .{ .path = undefined };
+    @memset(&addr.path, 0);
+    if (path.len >= addr.path.len) return error.PathTooLong;
+    @memcpy(addr.path[0..path.len], path);
+
+    try posix.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un));
+    return fd;
+}
+
+pub fn sendCommand(fd: posix.fd_t, cmd: []const u8, buf: []u8) ![]const u8 {
+    _ = try posix.write(fd, cmd);
+    const n = try posix.read(fd, buf);
+    if (n == 0) return error.EndOfStream;
+    return buf[0..n];
+}
+
+pub fn formatSwitch(buf: []u8, name: []const u8, device_id: ?[]const u8) []const u8 {
+    if (device_id) |dev| {
+        const len = (std.fmt.bufPrint(buf, "SWITCH {s} --device {s}\n", .{ name, dev }) catch return buf[0..0]).len;
+        return buf[0..len];
+    }
+    const len = (std.fmt.bufPrint(buf, "SWITCH {s}\n", .{name}) catch return buf[0..0]).len;
+    return buf[0..len];
+}
+
+// --- tests ---
+
+const testing = std.testing;
+
+test "formatSwitch: global" {
+    var buf: [256]u8 = undefined;
+    const cmd = formatSwitch(&buf, "fps", null);
+    try testing.expectEqualStrings("SWITCH fps\n", cmd);
+}
+
+test "formatSwitch: per-device" {
+    var buf: [256]u8 = undefined;
+    const cmd = formatSwitch(&buf, "racing", "hidraw0");
+    try testing.expectEqualStrings("SWITCH racing --device hidraw0\n", cmd);
+}
+
+test "sendCommand: socketpair round-trip" {
+    const fds = try posix.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    // Simulate server: write response on fds[1]
+    _ = try posix.write(fds[1], "OK fps\n");
+
+    var buf: [256]u8 = undefined;
+    const resp = try sendCommand(fds[0], "SWITCH fps\n", &buf);
+    try testing.expectEqualStrings("OK fps\n", resp);
+}
+
+test "sendCommand: empty response returns EndOfStream" {
+    const fds = try posix.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(fds[0]);
+    // Close server side immediately
+    posix.close(fds[1]);
+
+    var buf: [256]u8 = undefined;
+    const result = sendCommand(fds[0], "STATUS\n", &buf);
+    try testing.expectError(error.EndOfStream, result);
+}

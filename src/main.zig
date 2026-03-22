@@ -10,6 +10,10 @@ pub const cli = struct {
     pub const scan = @import("cli/scan.zig");
     pub const reload = @import("cli/reload.zig");
     pub const list_mappings = @import("cli/list_mappings.zig");
+    pub const socket_client = @import("cli/socket_client.zig");
+    pub const switch_mapping = @import("cli/switch_mapping.zig");
+    pub const status = @import("cli/status.zig");
+    pub const devices = @import("cli/devices.zig");
     pub const config = struct {
         pub const list = @import("cli/config/list.zig");
         pub const init = @import("cli/config/init.zig");
@@ -115,6 +119,10 @@ const Cli = struct {
     reload: bool = false,
     reload_pid: ?[]const u8 = null,
     config_cmd: ?ConfigCmd = null,
+    switch_cmd: ?struct { name: []const u8, device_id: ?[]const u8 = null } = null,
+    status_cmd: bool = false,
+    devices_cmd: bool = false,
+    socket_path: []const u8 = cli.socket_client.DEFAULT_SOCKET_PATH,
 
     fn deinit(self: *Cli) void {
         self.validate_files.deinit(self.allocator);
@@ -240,6 +248,43 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 std.log.err("unknown config subcommand: {s}", .{sub});
                 return error.UnknownArgument;
             }
+        } else if (std.mem.eql(u8, arg, "switch")) {
+            const name = args.next() orelse {
+                std.log.err("switch: missing mapping name", .{});
+                return error.MissingArgValue;
+            };
+            var device_id: ?[]const u8 = null;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--device")) {
+                    device_id = args.next() orelse return error.MissingArgValue;
+                } else if (std.mem.eql(u8, sub_arg, "--socket")) {
+                    parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown switch argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
+            parsed_cli.switch_cmd = .{ .name = name, .device_id = device_id };
+        } else if (std.mem.eql(u8, arg, "status")) {
+            parsed_cli.status_cmd = true;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--socket")) {
+                    parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown status argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
+        } else if (std.mem.eql(u8, arg, "devices")) {
+            parsed_cli.devices_cmd = true;
+            while (args.next()) |sub_arg| {
+                if (std.mem.eql(u8, sub_arg, "--socket")) {
+                    parsed_cli.socket_path = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown devices argument: {s}", .{sub_arg});
+                    return error.UnknownArgument;
+                }
+            }
         } else {
             std.log.err("unknown argument: {s}", .{arg});
             return error.UnknownArgument;
@@ -255,6 +300,9 @@ fn printHelp() void {
         \\       padctl scan [--config-dir <dir>]
         \\       padctl list-mappings [--config-dir <dir>]
         \\       padctl reload [--pid <pid>]
+        \\       padctl switch <name> [--device <id>] [--socket <path>]
+        \\       padctl status [--socket <path>]
+        \\       padctl devices [--socket <path>]
         \\
         \\Subcommands:
         \\  install               Install binary, service, udev rules, and device configs
@@ -265,6 +313,13 @@ fn printHelp() void {
         \\  list-mappings         List discovered mapping profiles from XDG paths
         \\    --config-dir <dir>  Also show device-specific mappings from this directory
         \\  reload [--pid <pid>]  Send SIGHUP to running padctl daemon
+        \\  switch <name>         Switch active mapping profile via daemon socket
+        \\    --device <id>       Apply only to specific device
+        \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
+        \\  status                Show daemon status (current mapping, devices)
+        \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
+        \\  devices               List connected devices via daemon
+        \\    --socket <path>     Socket path (default: /run/padctl/padctl.sock)
         \\  config list           List XDG-layer device and mapping configs
         \\  config init           Interactively create a mapping in ~/.config/padctl/mappings/
         \\    --device <name>     Skip device selection prompt
@@ -354,6 +409,24 @@ pub fn main() !void {
             std.process.exit(1);
         };
         std.process.exit(0);
+    }
+
+    // switch subcommand
+    if (parsed.switch_cmd) |sw| {
+        const rc = cli.switch_mapping.run(sw.name, sw.device_id, parsed.socket_path);
+        std.process.exit(rc);
+    }
+
+    // status subcommand
+    if (parsed.status_cmd) {
+        const rc = cli.status.run(parsed.socket_path);
+        std.process.exit(rc);
+    }
+
+    // devices subcommand
+    if (parsed.devices_cmd) {
+        const rc = cli.devices.run(parsed.socket_path);
+        std.process.exit(rc);
     }
 
     // config subcommand group
