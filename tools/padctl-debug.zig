@@ -140,6 +140,7 @@ pub fn main() !void {
 
     const cfg = &parsed.value;
     const interp = Interpreter.init(cfg);
+    const render_cfg = render.RenderConfig.deriveFromConfig(cfg);
     const vid: u16 = @intCast(cfg.device.vid & 0xffff);
     const pid: u16 = @intCast(cfg.device.pid & 0xffff);
 
@@ -261,7 +262,7 @@ pub fn main() !void {
         if (now - last_render >= 16) {
             last_render = now;
             fbs.reset();
-            render.renderFrame(writer, &gs, last_raw_storage[0..last_raw_len], rumble_on) catch {};
+            render.renderFrame(writer, &gs, last_raw_storage[0..last_raw_len], rumble_on, render_cfg) catch {};
             _ = posix.write(stdout_fd, fbs.getWritten()) catch {};
         }
     }

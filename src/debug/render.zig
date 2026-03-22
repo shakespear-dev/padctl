@@ -1,8 +1,14 @@
 const std = @import("std");
+const mem = std.mem;
 const state = @import("../core/state.zig");
+const device_config = @import("../config/device.zig");
 
 pub const GamepadState = state.GamepadState;
 pub const ButtonId = state.ButtonId;
+pub const DeviceConfig = device_config.DeviceConfig;
+
+// Box width: 68 visible chars between (and including) │ borders
+const W = 68;
 
 // ANSI helpers
 const CSI = "\x1b[";
@@ -13,6 +19,46 @@ const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
+
+pub const RenderConfig = struct {
+    has_gyro: bool = false,
+    has_touchpad: bool = false,
+    has_c: bool = false,
+    has_z: bool = false,
+    has_lm: bool = false,
+    has_rm: bool = false,
+    has_o: bool = false,
+
+    pub fn hasExtButtons(self: RenderConfig) bool {
+        return self.has_c or self.has_z or self.has_lm or self.has_rm or self.has_o;
+    }
+
+    pub fn deriveFromConfig(cfg: *const DeviceConfig) RenderConfig {
+        var rc = RenderConfig{};
+        for (cfg.report) |report| {
+            if (report.fields) |fields| {
+                var it = fields.map.iterator();
+                while (it.next()) |entry| {
+                    const name = entry.key_ptr.*;
+                    if (mem.eql(u8, name, "gyro_x")) rc.has_gyro = true;
+                    if (mem.eql(u8, name, "touch0_x")) rc.has_touchpad = true;
+                }
+            }
+            if (report.button_group) |bg| {
+                var it = bg.map.map.iterator();
+                while (it.next()) |entry| {
+                    const btn_name = entry.key_ptr.*;
+                    if (mem.eql(u8, btn_name, "C")) rc.has_c = true;
+                    if (mem.eql(u8, btn_name, "Z")) rc.has_z = true;
+                    if (mem.eql(u8, btn_name, "LM")) rc.has_lm = true;
+                    if (mem.eql(u8, btn_name, "RM")) rc.has_rm = true;
+                    if (mem.eql(u8, btn_name, "O")) rc.has_o = true;
+                }
+            }
+        }
+        return rc;
+    }
+};
 
 fn clearScreen(writer: anytype) !void {
     try writer.writeAll(CSI ++ "2J" ++ CSI ++ "H");
@@ -29,7 +75,6 @@ fn bar(writer: anytype, value: u8, width: u8) !void {
 }
 
 fn signedBar(writer: anytype, value: i16, width: u8) !void {
-    // center = width/2, positive goes right, negative goes left
     const half: u8 = width / 2;
     const norm: i32 = @divTrunc(@as(i32, value) * half, 32767);
     const pos: i32 = @as(i32, half) + norm;
@@ -47,7 +92,9 @@ fn signedBar(writer: anytype, value: i16, width: u8) !void {
     }
 }
 
-fn btnLabel(writer: anytype, gs: *const GamepadState, btn: ButtonId, label: []const u8) !void {
+/// Write a button label [TAG] with color based on pressed state.
+/// Returns the visible char count written.
+fn btnLabel(writer: anytype, gs: *const GamepadState, btn: ButtonId, label: []const u8) !usize {
     const bit: u6 = @intCast(@intFromEnum(btn));
     const pressed = gs.buttons & (@as(u64, 1) << bit) != 0;
     if (pressed) {
@@ -55,85 +102,163 @@ fn btnLabel(writer: anytype, gs: *const GamepadState, btn: ButtonId, label: []co
     } else {
         try writer.print(DIM ++ "[{s}]" ++ RESET, .{label});
     }
+    return label.len + 2; // [label]
 }
 
-/// Render a full TUI frame. Pure function: takes writer + GamepadState + raw report bytes.
-/// Assumes 80×24 terminal. Uses ANSI escape sequences only.
+/// Write spaces to pad from `col` to `target`, then write "│\r\n".
+fn closeRow(writer: anytype, col: usize) !void {
+    if (col < W - 1) {
+        var i: usize = col;
+        while (i < W - 1) : (i += 1) try writer.writeAll(" ");
+    }
+    try writer.writeAll("│\r\n");
+}
+
+/// Write a section header line: ├─ title ──...──┤
+fn sectionHeader(writer: anytype, title: []const u8) !void {
+    try writer.writeAll(BOLD ++ CYAN ++ "├─ " ++ RESET ++ BOLD ++ CYAN);
+    try writer.writeAll(title);
+    try writer.writeAll(" ");
+    // fill remaining with ─: used = 4 + title.len (├─ + title + space)
+    const used = 4 + title.len;
+    if (used < W) {
+        var i: usize = used;
+        while (i < W - 1) : (i += 1) try writer.writeAll("─");
+    }
+    try writer.writeAll("┤" ++ RESET ++ "\r\n");
+}
+
 pub fn renderFrame(
     writer: anytype,
     gs: *const GamepadState,
     raw: []const u8,
     rumble_on: bool,
+    config: RenderConfig,
 ) !void {
     try clearScreen(writer);
+
+    // Top border
     try writer.writeAll(BOLD ++ CYAN);
     try writer.writeAll("┌─ Sticks ──────────┬─ Triggers ──┬─ Buttons ──────────────────────┐\r\n");
     try writer.writeAll(RESET);
 
-    // Row 2: LX / LT bar / buttons row 1
-    try writer.writeAll("│ LX:");
-    try writer.print("{:>6} ", .{gs.ax});
-    try writer.writeAll("        │ LT ");
-    try bar(writer, gs.lt, 8);
-    try writer.writeAll(" │ ");
-    try btnLabel(writer, gs, .A, "A");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .B, "B");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .X, "X");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .Y, "Y");
-    try writer.writeAll("           │\r\n");
-
-    // Row 3: LY / RT bar / buttons row 2
-    try writer.writeAll("│ LY:");
-    try writer.print("{:>6} ", .{gs.ay});
-    try writer.writeAll("        │ RT ");
-    try bar(writer, gs.rt, 8);
-    try writer.writeAll(" │ ");
-    try btnLabel(writer, gs, .LB, "LB");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .RB, "RB");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .Start, "START");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .Select, "SEL");
-    try writer.writeAll("   │\r\n");
-
-    // Row 4: RX / LT value / buttons row 3
-    try writer.writeAll("│ RX:");
-    try writer.print("{:>6} ", .{gs.rx});
-    try writer.writeAll("        │ LT:");
-    try writer.print("{:>4} RT:{:>4}│ ", .{ gs.lt, gs.rt });
-    try btnLabel(writer, gs, .LS, "L3");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .RS, "R3");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .Home, "HOME");
-    try writer.writeAll("              │\r\n");
-
-    // Row 5: RY / dpad / buttons row 4
-    try writer.writeAll("│ RY:");
-    try writer.print("{:>6} ", .{gs.ry});
-    try writer.writeAll("        ├─ DPad ──────┤ ");
-    try btnLabel(writer, gs, .M1, "M1");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .M2, "M2");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .M3, "M3");
-    try writer.writeAll(" ");
-    try btnLabel(writer, gs, .M4, "M4");
-    try writer.writeAll("           │\r\n");
-
-    // Row 6: dpad up
+    // Row: LX / LT bar / buttons row 1
     {
-        const up_pressed = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadUp)))) != 0;
-        try writer.writeAll("│                   │     ");
-        if (up_pressed) try writer.writeAll(GREEN ++ "↑" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
-        try writer.writeAll("       │                               │\r\n");
+        try writer.writeAll("│ LX:");
+        try writer.print("{:>6} ", .{gs.ax});
+        try writer.writeAll("        │ LT ");
+        try bar(writer, gs.lt, 8);
+        try writer.writeAll(" │ ");
+        var col: usize = 36; // "│ LX:  1234         │ LT ████████ │ " = 36
+        col += try btnLabel(writer, gs, .A, "A");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .B, "B");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .X, "X");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .Y, "Y");
+        try closeRow(writer, col);
     }
 
-    // Row 7: dpad left/right
+    // Row: LY / RT bar / buttons row 2
+    {
+        try writer.writeAll("│ LY:");
+        try writer.print("{:>6} ", .{gs.ay});
+        try writer.writeAll("        │ RT ");
+        try bar(writer, gs.rt, 8);
+        try writer.writeAll(" │ ");
+        var col: usize = 36;
+        col += try btnLabel(writer, gs, .LB, "LB");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .RB, "RB");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .Start, "START");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .Select, "SEL");
+        try closeRow(writer, col);
+    }
+
+    // Row: RX / LT:RT values / buttons row 3
+    {
+        try writer.writeAll("│ RX:");
+        try writer.print("{:>6} ", .{gs.rx});
+        try writer.writeAll("        │ LT:");
+        try writer.print("{:>4} RT:{:>4}│ ", .{ gs.lt, gs.rt });
+        var col: usize = 36;
+        col += try btnLabel(writer, gs, .LS, "L3");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .RS, "R3");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .Home, "HOME");
+        try closeRow(writer, col);
+    }
+
+    // Row: RY / dpad header / M1-M4
+    {
+        try writer.writeAll("│ RY:");
+        try writer.print("{:>6} ", .{gs.ry});
+        try writer.writeAll("        ├─ DPad ──────┤ ");
+        var col: usize = 36;
+        col += try btnLabel(writer, gs, .M1, "M1");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .M2, "M2");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .M3, "M3");
+        try writer.writeAll(" ");
+        col += 1;
+        col += try btnLabel(writer, gs, .M4, "M4");
+        try closeRow(writer, col);
+    }
+
+    // DPad rows
+    {
+        const up_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadUp)))) != 0;
+        try writer.writeAll("│                   │     ");
+        if (up_p) try writer.writeAll(GREEN ++ "↑" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
+        try writer.writeAll("       │");
+        // right half: extended buttons or empty
+        if (config.hasExtButtons()) {
+            try writer.writeAll(" ");
+            var col: usize = 36;
+            if (config.has_c) {
+                col += try btnLabel(writer, gs, .C, "C");
+                try writer.writeAll(" ");
+                col += 1;
+            }
+            if (config.has_z) {
+                col += try btnLabel(writer, gs, .Z, "Z");
+                try writer.writeAll(" ");
+                col += 1;
+            }
+            if (config.has_lm) {
+                col += try btnLabel(writer, gs, .LM, "LM");
+                try writer.writeAll(" ");
+                col += 1;
+            }
+            if (config.has_rm) {
+                col += try btnLabel(writer, gs, .RM, "RM");
+                try writer.writeAll(" ");
+                col += 1;
+            }
+            if (config.has_o) {
+                col += try btnLabel(writer, gs, .O, "O");
+            }
+            try closeRow(writer, col);
+        } else {
+            try closeRow(writer, 35);
+        }
+    }
+
     {
         const left_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadLeft)))) != 0;
         const right_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadRight)))) != 0;
@@ -141,71 +266,92 @@ pub fn renderFrame(
         if (left_p) try writer.writeAll(GREEN ++ "←" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
         try writer.writeAll(" · ");
         if (right_p) try writer.writeAll(GREEN ++ "→" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
-        try writer.writeAll("     │                               │\r\n");
+        try writer.writeAll("     │");
+        try closeRow(writer, 35);
     }
 
-    // Row 8: dpad down
     {
         const down_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadDown)))) != 0;
         try writer.writeAll("│                   │     ");
         if (down_p) try writer.writeAll(GREEN ++ "↓" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
-        try writer.writeAll("       │                               │\r\n");
+        try writer.writeAll("       │");
+        try closeRow(writer, 35);
     }
 
-    try writer.writeAll(BOLD ++ CYAN);
-    try writer.writeAll("├─ Gyro ────────────────────────────────────────────────────────────┤\r\n");
-    try writer.writeAll(RESET);
+    // Gyro section (conditional)
+    if (config.has_gyro) {
+        try sectionHeader(writer, "Gyro");
 
-    // Gyro X
-    try writer.writeAll("│ GX ");
-    try signedBar(writer, gs.gyro_x, 32);
-    try writer.print("  {:>6}  AX:{:>6} │\r\n", .{ gs.gyro_x, gs.accel_x });
+        try writer.writeAll("│ GX ");
+        try signedBar(writer, gs.gyro_x, 32);
+        try writer.print("  {:>6}  AX:{:>6} ", .{ gs.gyro_x, gs.accel_x });
+        try closeRow(writer, W - 1);
 
-    // Gyro Y
-    try writer.writeAll("│ GY ");
-    try signedBar(writer, gs.gyro_y, 32);
-    try writer.print("  {:>6}  AY:{:>6} │\r\n", .{ gs.gyro_y, gs.accel_y });
+        try writer.writeAll("│ GY ");
+        try signedBar(writer, gs.gyro_y, 32);
+        try writer.print("  {:>6}  AY:{:>6} ", .{ gs.gyro_y, gs.accel_y });
+        try closeRow(writer, W - 1);
 
-    // Gyro Z
-    try writer.writeAll("│ GZ ");
-    try signedBar(writer, gs.gyro_z, 32);
-    try writer.print("  {:>6}  AZ:{:>6} │\r\n", .{ gs.gyro_z, gs.accel_z });
+        try writer.writeAll("│ GZ ");
+        try signedBar(writer, gs.gyro_z, 32);
+        try writer.print("  {:>6}  AZ:{:>6} ", .{ gs.gyro_z, gs.accel_z });
+        try closeRow(writer, W - 1);
+    }
 
-    try writer.writeAll(BOLD ++ CYAN);
-    try writer.writeAll("├─ Raw Hex ─────────────────────────────────────────────────────────┤\r\n");
-    try writer.writeAll(RESET);
+    // Touchpad section (conditional)
+    if (config.has_touchpad) {
+        try sectionHeader(writer, "Touchpad");
 
-    // Hex dump up to 32 bytes, two rows of 16
+        // Touch0
+        {
+            const active_str = if (gs.touch0_active) GREEN ++ "ON " ++ RESET else DIM ++ "OFF" ++ RESET;
+            try writer.writeAll("│ T0 ");
+            try writer.writeAll(active_str);
+            try writer.print("  X:{:>6}  Y:{:>6}", .{ gs.touch0_x, gs.touch0_y });
+            try closeRow(writer, 33);
+        }
+
+        // Touch1
+        {
+            const active_str = if (gs.touch1_active) GREEN ++ "ON " ++ RESET else DIM ++ "OFF" ++ RESET;
+            try writer.writeAll("│ T1 ");
+            try writer.writeAll(active_str);
+            try writer.print("  X:{:>6}  Y:{:>6}", .{ gs.touch1_x, gs.touch1_y });
+            try closeRow(writer, 33);
+        }
+    }
+
+    // Raw hex section
+    try sectionHeader(writer, "Raw Hex");
+
     try writer.writeAll("│ ");
     const show = @min(raw.len, 16);
     for (raw[0..show]) |b| {
         try writer.print("{x:0>2} ", .{b});
     }
-    if (show < 16) {
-        var pad: usize = 0;
-        while (pad < 16 - show) : (pad += 1) try writer.writeAll("   ");
-    }
-    try writer.writeAll("│\r\n│ ");
+    // 2 + show*3 visible chars so far; pad to W-1
+    try closeRow(writer, 2 + show * 3);
+
+    try writer.writeAll("│ ");
     const show2 = if (raw.len > 16) @min(raw.len - 16, 16) else 0;
     for (raw[raw.len - show2 ..]) |b| {
         try writer.print("{x:0>2} ", .{b});
     }
-    if (show2 < 16) {
-        var pad: usize = 0;
-        while (pad < 16 - show2) : (pad += 1) try writer.writeAll("   ");
-    }
-    try writer.writeAll("│\r\n");
+    try closeRow(writer, 2 + show2 * 3);
 
-    try writer.writeAll(BOLD ++ CYAN);
-    try writer.writeAll("└");
-    try writer.writeAll(RESET);
+    // Bottom border with hotkeys
+    try writer.writeAll(BOLD ++ CYAN ++ "└" ++ RESET);
     if (rumble_on) {
         try writer.writeAll(YELLOW ++ " [Q]uit  [R]umble ON  " ++ RESET);
     } else {
         try writer.writeAll(" [Q]uit  [R]umble OFF ");
     }
-    try writer.writeAll(BOLD ++ CYAN ++ "────────────────────────────────────────────┘" ++ RESET);
-    try writer.writeAll("\r\n");
+    // 23 visible chars used (└ + 22 text), fill rest with ─ then ┘
+    try writer.writeAll(BOLD ++ CYAN);
+    const footer_used = 23;
+    var fi: usize = footer_used;
+    while (fi < W - 1) : (fi += 1) try writer.writeAll("─");
+    try writer.writeAll("┘" ++ RESET ++ "\r\n");
 }
 
 // --- tests ---
@@ -231,12 +377,14 @@ fn makeTestState() GamepadState {
     };
 }
 
+const default_config = RenderConfig{ .has_gyro = true };
+
 test "renderFrame: contains axis values" {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{ 0x5a, 0xa5, 0xef, 0x01, 0x02 };
-    try renderFrame(fbs.writer(), &gs, &raw, false);
+    try renderFrame(fbs.writer(), &gs, &raw, false, default_config);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "1234") != null);
     try testing.expect(std.mem.indexOf(u8, out, "-567") != null);
@@ -245,34 +393,58 @@ test "renderFrame: contains axis values" {
 }
 
 test "renderFrame: contains trigger values" {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false);
+    try renderFrame(fbs.writer(), &gs, &raw, false, default_config);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "128") != null);
     try testing.expect(std.mem.indexOf(u8, out, "64") != null);
 }
 
 test "renderFrame: contains gyro values" {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false);
+    try renderFrame(fbs.writer(), &gs, &raw, false, default_config);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "100") != null);
     try testing.expect(std.mem.indexOf(u8, out, "-200") != null);
     try testing.expect(std.mem.indexOf(u8, out, "300") != null);
 }
 
+test "renderFrame: no gyro section when disabled" {
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const gs = makeTestState();
+    const raw = [_]u8{};
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{});
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "Gyro") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "GX") == null);
+}
+
+test "renderFrame: touchpad section when enabled" {
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var gs = GamepadState{};
+    gs.touch0_x = 500;
+    gs.touch0_active = true;
+    const raw = [_]u8{};
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{ .has_touchpad = true });
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "Touchpad") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "500") != null);
+}
+
 test "renderFrame: contains raw hex bytes" {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
     const raw = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
-    try renderFrame(fbs.writer(), &gs, &raw, false);
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{});
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "de") != null);
     try testing.expect(std.mem.indexOf(u8, out, "ad") != null);
@@ -281,29 +453,28 @@ test "renderFrame: contains raw hex bytes" {
 }
 
 test "renderFrame: rumble_on shows rumble indicator" {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, true);
+    try renderFrame(fbs.writer(), &gs, &raw, true, .{});
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "ON") != null);
 }
 
 test "renderFrame: contains ANSI escape sequences" {
-    var buf: [4096]u8 = undefined;
+    var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false);
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{});
     const out = fbs.getWritten();
-    // Must contain ESC[ (CSI)
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[") != null);
 }
 
 test "renderFrame: pressed button highlighted differently" {
-    var buf_pressed: [4096]u8 = undefined;
-    var buf_released: [4096]u8 = undefined;
+    var buf_pressed: [8192]u8 = undefined;
+    var buf_released: [8192]u8 = undefined;
     var fbs1 = std.io.fixedBufferStream(&buf_pressed);
     var fbs2 = std.io.fixedBufferStream(&buf_released);
 
@@ -313,9 +484,20 @@ test "renderFrame: pressed button highlighted differently" {
     gs_released.buttons = 0;
 
     const raw = [_]u8{};
-    try renderFrame(fbs1.writer(), &gs_pressed, &raw, false);
-    try renderFrame(fbs2.writer(), &gs_released, &raw, false);
+    try renderFrame(fbs1.writer(), &gs_pressed, &raw, false, .{});
+    try renderFrame(fbs2.writer(), &gs_released, &raw, false, .{});
 
-    // The two outputs must differ (pressed state changes rendering)
     try testing.expect(!std.mem.eql(u8, fbs1.getWritten(), fbs2.getWritten()));
+}
+
+test "renderFrame: extended buttons shown when configured" {
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var gs = GamepadState{};
+    gs.buttons = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.C)));
+    const raw = [_]u8{};
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{ .has_c = true, .has_z = true });
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "[C]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[Z]") != null);
 }
