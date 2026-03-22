@@ -517,26 +517,17 @@ pub const Supervisor = struct {
 
     fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
-        var resp_buf: [512]u8 = undefined;
-        var pos: usize = 0;
+        var buf: [1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buf);
+        const w = stream.writer();
 
-        const header = "STATUS ";
-        @memcpy(resp_buf[pos .. pos + header.len], header);
-        pos += header.len;
-
-        for (self.managed.items, 0..) |*m, i| {
-            if (i > 0) {
-                resp_buf[pos] = ' ';
-                pos += 1;
-            }
-            const key = m.phys_key;
-            const copy_len = @min(key.len, resp_buf.len - pos - 2);
-            @memcpy(resp_buf[pos .. pos + copy_len], key[0..copy_len]);
-            pos += copy_len;
+        w.writeAll("STATUS") catch return;
+        for (self.managed.items) |*m| {
+            const name = m.devname orelse m.phys_key;
+            w.print(" device={s} active=true", .{name}) catch break;
         }
-        resp_buf[pos] = '\n';
-        pos += 1;
-        cs.sendResponse(fd, resp_buf[0..pos]);
+        w.writeByte('\n') catch return;
+        cs.sendResponse(fd, stream.getWritten());
     }
 
     fn handleList(self: *Supervisor, fd: posix.fd_t) void {

@@ -58,9 +58,10 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         const phys_raw = readPhysFromSysfs(path) orelse "";
 
         if (phys_raw.len > 0) {
-            const gop = try phys_seen.getOrPut(try allocator.dupe(u8, phys_raw));
+            const new_phys = try allocator.dupe(u8, phys_raw);
+            const gop = try phys_seen.getOrPut(new_phys);
             if (gop.found_existing) {
-                allocator.free(gop.key_ptr.*);
+                allocator.free(new_phys);
                 continue;
             }
         }
