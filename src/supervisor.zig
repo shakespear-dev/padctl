@@ -9,6 +9,7 @@ const config_device = @import("config/device.zig");
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
 const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
+const readPhysFromSysfs = @import("io/hidraw.zig").readPhysFromSysfs;
 const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
@@ -808,9 +809,7 @@ pub const Supervisor = struct {
         }
         if (cfg == null) return;
 
-        var phys_buf: [256]u8 = std.mem.zeroes([256]u8);
-        _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&phys_buf));
-        const phys = std.mem.sliceTo(&phys_buf, 0);
+        const phys = readPhysFromSysfs(path) orelse "";
 
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);

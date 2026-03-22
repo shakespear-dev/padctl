@@ -2,11 +2,11 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const ioctl = @import("../io/ioctl_constants.zig");
+const readPhysFromSysfs = @import("../io/hidraw.zig").readPhysFromSysfs;
 
 const DEFAULT_CONFIG_DIR = "/usr/share/padctl/devices";
 const MAX_HIDRAW = 64;
 const NAME_BUF_LEN = 128;
-const PHYS_BUF_LEN = 256;
 
 // HIDIOCGRAWNAME(128): dir=READ('H', 0x04, 128)
 const HIDIOCGRAWNAME: u32 = blk: {
@@ -55,9 +55,7 @@ pub fn scan(allocator: std.mem.Allocator, config_dir: []const u8) ![]ScanEntry {
         var info: ioctl.HidrawDevinfo = undefined;
         if (linux.ioctl(fd, ioctl.HIDIOCGRAWINFO, @intFromPtr(&info)) != 0) continue;
 
-        var phys_buf: [PHYS_BUF_LEN]u8 = std.mem.zeroes([PHYS_BUF_LEN]u8);
-        _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&phys_buf));
-        const phys_raw = std.mem.sliceTo(&phys_buf, 0);
+        const phys_raw = readPhysFromSysfs(path) orelse "";
 
         if (phys_raw.len > 0) {
             const gop = try phys_seen.getOrPut(try allocator.dupe(u8, phys_raw));
