@@ -1,27 +1,29 @@
 const std = @import("std");
 
-const service_content =
-    \\[Unit]
-    \\Description=padctl gamepad compatibility daemon
-    \\After=local-fs.target
-    \\
-    \\[Service]
-    \\Type=simple
-    \\ExecStart=/usr/bin/padctl --config-dir /usr/share/padctl/devices/ --pid-file /run/padctl.pid
-    \\PIDFile=/run/padctl.pid
-    \\Restart=on-failure
-    \\RestartSec=3
-    \\ProtectSystem=strict
-    \\ProtectHome=true
-    \\PrivateTmp=true
-    \\NoNewPrivileges=true
-    \\DeviceAllow=/dev/hidraw* rw
-    \\DeviceAllow=/dev/uinput rw
-    \\
-    \\[Install]
-    \\WantedBy=multi-user.target
-    \\
-;
+fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator,
+        \\[Unit]
+        \\Description=padctl gamepad compatibility daemon
+        \\After=local-fs.target
+        \\
+        \\[Service]
+        \\Type=simple
+        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/ --pid-file /run/padctl.pid
+        \\PIDFile=/run/padctl.pid
+        \\Restart=on-failure
+        \\RestartSec=3
+        \\ProtectSystem=strict
+        \\ProtectHome=true
+        \\PrivateTmp=true
+        \\NoNewPrivileges=true
+        \\DeviceAllow=/dev/hidraw* rw
+        \\DeviceAllow=/dev/uinput rw
+        \\
+        \\[Install]
+        \\WantedBy=multi-user.target
+        \\
+    , .{ prefix, prefix });
+}
 
 pub const InstallOptions = struct {
     prefix: []const u8 = "/usr",
@@ -127,9 +129,11 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
     }
 
-    // 2. Write embedded service file
+    // 2. Write service file with correct prefix paths
     const service_path = try std.fmt.allocPrint(allocator, "{s}/padctl.service", .{lib_systemd_dir});
     defer allocator.free(service_path);
+    const service_content = try generateServiceContent(allocator, prefix);
+    defer allocator.free(service_content);
     {
         var f = try std.fs.createFileAbsolute(service_path, .{ .truncate = true });
         defer f.close();
@@ -142,7 +146,12 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 3. Copy devices/*.toml
     const src_devices = try std.fmt.allocPrint(allocator, "{s}/devices", .{self_dir});
     defer allocator.free(src_devices);
-    copyDevicesTomls(allocator, src_devices, share_dir) catch {};
+    copyDevicesTomls(allocator, src_devices, share_dir) catch |err| {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "warning: device configs not installed: ") catch {};
+        var errbuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&errbuf, "{}\n", .{err}) catch "unknown error\n";
+        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+    };
 
     // 4. Generate 99-padctl.rules
     const rules_path = try std.fmt.allocPrint(allocator, "{s}/99-padctl.rules", .{udev_dir});
@@ -161,6 +170,60 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     }
 
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\nInstall complete.\n") catch {};
+}
+
+pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
+    if (std.os.linux.getuid() != 0) {
+        _ = std.posix.write(std.posix.STDERR_FILENO, "error: must run as root — use: sudo padctl uninstall\n") catch {};
+        std.process.exit(1);
+    }
+
+    const prefix = opts.prefix;
+    const destdir = opts.destdir;
+
+    // Stop and disable the service (ignore errors — may not be running)
+    if (destdir.len == 0) {
+        runCmd(&.{ "systemctl", "stop", "padctl.service" });
+        runCmd(&.{ "systemctl", "disable", "padctl.service" });
+    }
+
+    const files = [_][]const u8{
+        "/bin/padctl",
+        "/bin/padctl-capture",
+        "/bin/padctl-debug",
+        "/lib/systemd/system/padctl.service",
+        "/lib/udev/rules.d/99-padctl.rules",
+    };
+
+    for (files) |suffix| {
+        const path = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ destdir, prefix, suffix });
+        defer allocator.free(path);
+        std.fs.deleteFileAbsolute(path) catch {
+            continue;
+        };
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, path) catch {};
+        _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+    }
+
+    // Remove share dir recursively
+    const share_dir = try std.fmt.allocPrint(allocator, "{s}{s}/share/padctl", .{ destdir, prefix });
+    defer allocator.free(share_dir);
+    std.fs.deleteTreeAbsolute(share_dir) catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "  removed ") catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, share_dir) catch {};
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "/\n") catch {};
+
+    // Remove runtime files
+    std.fs.deleteFileAbsolute("/run/padctl.pid") catch {};
+    std.fs.deleteFileAbsolute("/run/padctl/padctl.sock") catch {};
+
+    if (destdir.len == 0) {
+        runCmd(&.{ "systemctl", "daemon-reload" });
+        runCmd(&.{ "udevadm", "control", "--reload-rules" });
+    }
+
+    _ = std.posix.write(std.posix.STDOUT_FILENO, "\nUninstall complete.\n") catch {};
 }
 
 fn copyDevicesTomls(allocator: std.mem.Allocator, src_dir: []const u8, dst_dir: []const u8) !void {
@@ -244,6 +307,13 @@ fn generateUdevRules(allocator: std.mem.Allocator, devices_dir: []const u8, rule
     try f.writeAll(buf.items);
 }
 
+fn isFieldKey(line: []const u8, key: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, key)) return false;
+    if (line.len == key.len) return true;
+    const next = line[key.len];
+    return next == '=' or next == ' ' or next == '\t';
+}
+
 fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.ArrayList(UdevEntry)) !void {
     var f = try std.fs.openFileAbsolute(path, .{});
     defer f.close();
@@ -258,19 +328,19 @@ fn extractVidPid(allocator: std.mem.Allocator, path: []const u8, entries: *std.A
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.startsWith(u8, trimmed, "name")) {
+        if (isFieldKey(trimmed, "name")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
                 const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"");
                 const n = @min(val.len, name_buf.len - 1);
                 @memcpy(name_buf[0..n], val[0..n]);
                 name = name_buf[0..n];
             }
-        } else if (std.mem.startsWith(u8, trimmed, "vid")) {
+        } else if (isFieldKey(trimmed, "vid")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
                 const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
                 vid = parseHexOrDec(u16, val) catch continue;
             }
-        } else if (std.mem.startsWith(u8, trimmed, "pid")) {
+        } else if (isFieldKey(trimmed, "pid")) {
             if (std.mem.indexOf(u8, trimmed, "=")) |eq| {
                 const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t#");
                 pid = parseHexOrDec(u16, val) catch continue;
@@ -339,6 +409,64 @@ test "extractVidPid from vader5 content" {
     try testing.expectEqual(@as(u16, 0x37d7), entries.items[0].vid);
     try testing.expectEqual(@as(u16, 0x2401), entries.items[0].pid);
     try testing.expectEqualStrings("Flydigi Vader 5 Pro", entries.items[0].name);
+}
+
+test "isFieldKey exact and prefix-safe" {
+    const testing = std.testing;
+    try testing.expect(isFieldKey("pid = 0x2401", "pid"));
+    try testing.expect(isFieldKey("pid=0x2401", "pid"));
+    try testing.expect(isFieldKey("vid\t= 0x37d7", "vid"));
+    try testing.expect(!isFieldKey("pid_controller = true", "pid"));
+    try testing.expect(!isFieldKey("video = true", "vid"));
+    try testing.expect(isFieldKey("name = \"Test\"", "name"));
+    try testing.expect(!isFieldKey("namespace = \"x\"", "name"));
+}
+
+test "extractVidPid ignores pid_controller field" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const toml_content =
+        \\[device]
+        \\name = "Test"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\pid_controller = true
+    ;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    const toml_path = try std.fmt.allocPrint(allocator, "{s}/test2.toml", .{tmp_path});
+    defer allocator.free(toml_path);
+    {
+        var file = try std.fs.createFileAbsolute(toml_path, .{});
+        defer file.close();
+        try file.writeAll(toml_content);
+    }
+
+    var entries = std.ArrayList(UdevEntry){};
+    defer {
+        for (entries.items) |e| allocator.free(e.name);
+        entries.deinit(allocator);
+    }
+    try extractVidPid(allocator, toml_path, &entries);
+
+    try testing.expectEqual(@as(usize, 1), entries.items.len);
+    try testing.expectEqual(@as(u16, 0x1234), entries.items[0].vid);
+    try testing.expectEqual(@as(u16, 0x5678), entries.items[0].pid);
+}
+
+test "generateServiceContent uses prefix" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const content = try generateServiceContent(allocator, "/usr/local");
+    defer allocator.free(content);
+    try testing.expect(std.mem.indexOf(u8, content, "/usr/local/bin/padctl") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/usr/local/share/padctl/devices/") != null);
+    try testing.expect(std.mem.indexOf(u8, content, "/usr/bin/padctl") == null);
 }
 
 test "generateUdevRules produces valid output" {

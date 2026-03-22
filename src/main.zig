@@ -123,6 +123,7 @@ const Cli = struct {
     doc_gen: bool = false,
     doc_gen_output: []const u8 = "docs/src/devices",
     install_opts: ?cli.install.InstallOptions = null,
+    uninstall_opts: ?cli.install.InstallOptions = null,
     scan: bool = false,
     scan_config_dir: ?[]const u8 = null,
     list_mappings: bool = false,
@@ -180,6 +181,19 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                 }
             }
             parsed_cli.install_opts = opts;
+        } else if (std.mem.eql(u8, arg, "uninstall")) {
+            var opts = cli.install.InstallOptions{};
+            while (args.next()) |iarg| {
+                if (std.mem.eql(u8, iarg, "--prefix")) {
+                    opts.prefix = args.next() orelse return error.MissingArgValue;
+                } else if (std.mem.eql(u8, iarg, "--destdir")) {
+                    opts.destdir = args.next() orelse return error.MissingArgValue;
+                } else {
+                    std.log.err("unknown uninstall argument: {s}", .{iarg});
+                    return error.UnknownArgument;
+                }
+            }
+            parsed_cli.uninstall_opts = opts;
         } else if (std.mem.eql(u8, arg, "scan")) {
             parsed_cli.scan = true;
             while (args.next()) |sub_arg| {
@@ -311,6 +325,7 @@ fn printHelp() void {
     const help =
         \\Usage: padctl [options]
         \\       padctl install [--prefix /usr] [--destdir ""]
+        \\       padctl uninstall [--prefix /usr] [--destdir ""]
         \\       padctl scan [--config-dir <dir>]
         \\       padctl list-mappings [--config-dir <dir>]
         \\       padctl reload [--pid <pid>]
@@ -322,6 +337,9 @@ fn printHelp() void {
         \\  install               Install binary, service, udev rules, and device configs
         \\    --prefix <dir>      Installation prefix (default: /usr)
         \\    --destdir <dir>     Staging root for package builds (default: "")
+        \\  uninstall             Remove installed files, stop and disable service
+        \\    --prefix <dir>      Installation prefix (default: /usr)
+        \\    --destdir <dir>     Staging root (default: "")
         \\  scan                  List connected HID devices and config match status
         \\    --config-dir <dir>  Search for device configs here (default: XDG paths)
         \\  list-mappings         List discovered mapping profiles from XDG paths
@@ -408,6 +426,15 @@ pub fn main() !void {
     if (parsed.install_opts) |opts| {
         cli.install.run(allocator, opts) catch |err| {
             std.log.err("install failed: {}", .{err});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    }
+
+    // uninstall subcommand
+    if (parsed.uninstall_opts) |opts| {
+        cli.install.uninstall(allocator, opts) catch |err| {
+            std.log.err("uninstall failed: {}", .{err});
             std.process.exit(1);
         };
         std.process.exit(0);
