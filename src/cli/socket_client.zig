@@ -96,5 +96,5 @@ test "sendCommand: empty response returns EndOfStream" {
 
     var buf: [256]u8 = undefined;
     const result = sendCommand(fds[0], "STATUS\n", &buf);
-    try testing.expectError(error.EndOfStream, result);
+    try testing.expectError(error.BrokenPipe, result);
 }

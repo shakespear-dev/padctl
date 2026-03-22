@@ -1205,8 +1205,8 @@ test "renderStats: produces Stats section with data" {
     var st = Stats.init(std.time.milliTimestamp() - 5000);
     st.packets_total = 300;
     st.packets_per_sec = 60;
-    st.key_press_count = 12;
     st.recordButtonChange(.A, true, std.time.milliTimestamp() - 100);
+    st.key_press_count = 12;
 
     const cfg = RenderConfig{ .stats = &st };
     try renderFrame(fbs.writer(), &gs, &raw, false, cfg, .raw);

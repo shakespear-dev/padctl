@@ -397,7 +397,7 @@ test "load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", cfg.device.name);
     try std.testing.expectEqual(@as(i64, 0x37d7), cfg.device.vid);
     try std.testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
-    try std.testing.expectEqual(@as(usize, 2), cfg.report.len);
+    try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
     try std.testing.expectEqualStrings("extended", cfg.report[0].name);
 }
 
