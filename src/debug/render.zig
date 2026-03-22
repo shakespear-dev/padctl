@@ -29,6 +29,8 @@ pub const OutputInfo = struct {
     mapping_file: []const u8 = "",
 };
 
+pub const button_id_count = std.meta.fields(ButtonId).len;
+
 pub const RenderConfig = struct {
     has_gyro: bool = false,
     has_touchpad: bool = false,
@@ -38,9 +40,14 @@ pub const RenderConfig = struct {
     has_rm: bool = false,
     has_o: bool = false,
     output_info: ?OutputInfo = null,
+    button_labels: [button_id_count]?[]const u8 = .{null} ** button_id_count,
 
     pub fn hasExtButtons(self: RenderConfig) bool {
         return self.has_c or self.has_z or self.has_lm or self.has_rm or self.has_o;
+    }
+
+    pub fn btnDisplayLabel(self: *const RenderConfig, btn: ButtonId, default: []const u8) []const u8 {
+        return self.button_labels[@intFromEnum(btn)] orelse default;
     }
 
     pub fn deriveFromConfig(cfg: *const DeviceConfig) RenderConfig {
@@ -144,6 +151,7 @@ pub fn renderFrame(
     view_mode: ViewMode,
 ) !void {
     try clearScreen(writer);
+    const ml = view_mode == .mapped;
 
     // Header: show output device name in mapped mode
     if (view_mode == .mapped) {
@@ -182,16 +190,16 @@ pub fn renderFrame(
         try pad(writer, CL + 14, CL + CM); // CL+14=34, pad to 35 if needed
         try writer.writeAll("│ ");
         var col: usize = CR_START + 2; // 37
-        col += try btnLabel(writer, gs, .A, "A");
+        col += try btnLabel(writer, gs, .A, if (ml) config.btnDisplayLabel(.A, "A") else "A");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .B, "B");
+        col += try btnLabel(writer, gs, .B, if (ml) config.btnDisplayLabel(.B, "B") else "B");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .X, "X");
+        col += try btnLabel(writer, gs, .X, if (ml) config.btnDisplayLabel(.X, "X") else "X");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Y, "Y");
+        col += try btnLabel(writer, gs, .Y, if (ml) config.btnDisplayLabel(.Y, "Y") else "Y");
         try closeRow(writer, col);
     }
 
@@ -205,16 +213,16 @@ pub fn renderFrame(
         try pad(writer, CL + 14, CL + CM);
         try writer.writeAll("│ ");
         var col: usize = CR_START + 2;
-        col += try btnLabel(writer, gs, .LB, "LB");
+        col += try btnLabel(writer, gs, .LB, if (ml) config.btnDisplayLabel(.LB, "LB") else "LB");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .RB, "RB");
+        col += try btnLabel(writer, gs, .RB, if (ml) config.btnDisplayLabel(.RB, "RB") else "RB");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Start, "START");
+        col += try btnLabel(writer, gs, .Start, if (ml) config.btnDisplayLabel(.Start, "START") else "START");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Select, "SEL");
+        col += try btnLabel(writer, gs, .Select, if (ml) config.btnDisplayLabel(.Select, "SEL") else "SEL");
         try closeRow(writer, col);
     }
 
@@ -231,13 +239,13 @@ pub fn renderFrame(
         try pad(writer, CL + 14, CL + CM);
         try writer.writeAll("│ ");
         var col: usize = CR_START + 2;
-        col += try btnLabel(writer, gs, .LS, "L3");
+        col += try btnLabel(writer, gs, .LS, if (ml) config.btnDisplayLabel(.LS, "L3") else "L3");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .RS, "R3");
+        col += try btnLabel(writer, gs, .RS, if (ml) config.btnDisplayLabel(.RS, "R3") else "R3");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Home, "HOME");
+        col += try btnLabel(writer, gs, .Home, if (ml) config.btnDisplayLabel(.Home, "HOME") else "HOME");
         try closeRow(writer, col);
     }
 
@@ -249,16 +257,16 @@ pub fn renderFrame(
         // ├─ DPad ───────┤ = CM+1 visible (┤ at CR_START), then 1 space
         try writer.writeAll("├─ DPad ───────┤ ");
         var col: usize = CR_START + 1;
-        col += try btnLabel(writer, gs, .M1, "M1");
+        col += try btnLabel(writer, gs, .M1, if (ml) config.btnDisplayLabel(.M1, "M1") else "M1");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .M2, "M2");
+        col += try btnLabel(writer, gs, .M2, if (ml) config.btnDisplayLabel(.M2, "M2") else "M2");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .M3, "M3");
+        col += try btnLabel(writer, gs, .M3, if (ml) config.btnDisplayLabel(.M3, "M3") else "M3");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .M4, "M4");
+        col += try btnLabel(writer, gs, .M4, if (ml) config.btnDisplayLabel(.M4, "M4") else "M4");
         try closeRow(writer, col);
     }
 
@@ -276,27 +284,27 @@ pub fn renderFrame(
             try writer.writeAll(" ");
             var col: usize = CR_START + 2;
             if (config.has_c) {
-                col += try btnLabel(writer, gs, .C, "C");
+                col += try btnLabel(writer, gs, .C, if (ml) config.btnDisplayLabel(.C, "C") else "C");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_z) {
-                col += try btnLabel(writer, gs, .Z, "Z");
+                col += try btnLabel(writer, gs, .Z, if (ml) config.btnDisplayLabel(.Z, "Z") else "Z");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_lm) {
-                col += try btnLabel(writer, gs, .LM, "LM");
+                col += try btnLabel(writer, gs, .LM, if (ml) config.btnDisplayLabel(.LM, "LM") else "LM");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_rm) {
-                col += try btnLabel(writer, gs, .RM, "RM");
+                col += try btnLabel(writer, gs, .RM, if (ml) config.btnDisplayLabel(.RM, "RM") else "RM");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_o) {
-                col += try btnLabel(writer, gs, .O, "O");
+                col += try btnLabel(writer, gs, .O, if (ml) config.btnDisplayLabel(.O, "O") else "O");
             }
             try closeRow(writer, col);
         } else {

@@ -9,6 +9,7 @@ const InterfaceConfig = device_config.InterfaceConfig;
 const Interpreter = src.core.interpreter.Interpreter;
 const Mapper = src.core.mapper.Mapper;
 const GamepadState = src.core.state.GamepadState;
+const ButtonId = src.core.state.ButtonId;
 const DeviceIO = src.io.device_io.DeviceIO;
 const HidrawDevice = src.io.hidraw.HidrawDevice;
 const UsbrawDevice = src.io.usbraw.UsbrawDevice;
@@ -183,6 +184,38 @@ pub fn main() !void {
             info.mapping_file = mpath;
         } else {
             render_cfg.output_info = .{ .mapping_file = mpath };
+        }
+    }
+
+    // Populate button labels for mapped view: output.buttons as base, remap as override
+    if (cfg.output) |out| {
+        if (out.buttons) |buttons| {
+            var it = buttons.map.iterator();
+            while (it.next()) |entry| {
+                if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
+                    render_cfg.button_labels[@intFromEnum(btn)] = entry.value_ptr.*;
+                }
+            }
+        }
+    }
+    if (mapping_parsed) |mp| {
+        if (mp.value.remap) |remap| {
+            var it = remap.map.iterator();
+            while (it.next()) |entry| {
+                if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
+                    const target = entry.value_ptr.*;
+                    if (std.mem.eql(u8, target, "disabled")) {
+                        render_cfg.button_labels[@intFromEnum(btn)] = "---";
+                    } else if (std.meta.stringToEnum(ButtonId, target)) |target_btn| {
+                        // Remap to another button: use that button's output label
+                        render_cfg.button_labels[@intFromEnum(btn)] =
+                            render_cfg.button_labels[@intFromEnum(target_btn)] orelse target;
+                    } else {
+                        // Event code name (KEY_SPACE, BTN_LEFT, etc.)
+                        render_cfg.button_labels[@intFromEnum(btn)] = target;
+                    }
+                }
+            }
         }
     }
 
