@@ -24,6 +24,11 @@ const GREEN = "\x1b[32m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
+pub const OutputInfo = struct {
+    name: []const u8 = "Unknown",
+    mapping_file: []const u8 = "",
+};
+
 pub const RenderConfig = struct {
     has_gyro: bool = false,
     has_touchpad: bool = false,
@@ -32,6 +37,7 @@ pub const RenderConfig = struct {
     has_lm: bool = false,
     has_rm: bool = false,
     has_o: bool = false,
+    output_info: ?OutputInfo = null,
 
     pub fn hasExtButtons(self: RenderConfig) bool {
         return self.has_c or self.has_z or self.has_lm or self.has_rm or self.has_o;
@@ -139,11 +145,32 @@ pub fn renderFrame(
 ) !void {
     try clearScreen(writer);
 
-    // ┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐
-    // 1 + 19 + 1 + 14 + 1 + 33 + 1 = 70
-    try writer.writeAll(BOLD ++ CYAN ++
-        "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
-        RESET);
+    // Header: show output device name in mapped mode
+    if (view_mode == .mapped) {
+        if (config.output_info) |info| {
+            // ┌─ Output: <name> ──...──┐  (W=70)
+            const prefix = "┌─ Output: ";
+            const max_name = W - 4 - 11; // 4 = "─┐" + margins, 11 = prefix visible len
+            const name_len = @min(info.name.len, max_name);
+            try writer.writeAll(BOLD ++ CYAN ++ prefix);
+            try writer.writeAll(info.name[0..name_len]);
+            try writer.writeAll(" ");
+            const used = 11 + name_len + 1;
+            var hi: usize = used;
+            while (hi < W - 1) : (hi += 1) try writer.writeAll("─");
+            try writer.writeAll("┐\r\n" ++ RESET);
+        } else {
+            try writer.writeAll(BOLD ++ CYAN ++
+                "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
+                RESET);
+        }
+    } else {
+        // ┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐
+        // 1 + 19 + 1 + 14 + 1 + 33 + 1 = 70
+        try writer.writeAll(BOLD ++ CYAN ++
+            "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
+            RESET);
+    }
 
     // Row 1: LX / LT bar / A B X Y
     {
@@ -368,8 +395,23 @@ pub fn renderFrame(
         .raw => try writer.writeAll(" [M]ode: RAW "),
         .mapped => try writer.writeAll(YELLOW ++ " [M]ode: MAPPED " ++ RESET),
     }
-    try writer.writeAll(BOLD ++ CYAN);
     var fi: usize = 37; // └(1) + rumble(22) + mode(14) = 37 visible
+    // Show mapping file in mapped mode
+    if (view_mode == .mapped) {
+        if (config.output_info) |info| {
+            if (info.mapping_file.len > 0) {
+                const max_len = W - 2 - fi; // leave room for ┘
+                if (max_len > 4) {
+                    const show_len = @min(info.mapping_file.len, max_len - 1);
+                    try writer.writeAll(DIM);
+                    try writer.writeAll(info.mapping_file[0..show_len]);
+                    try writer.writeAll(RESET);
+                    fi += show_len;
+                }
+            }
+        }
+    }
+    try writer.writeAll(BOLD ++ CYAN);
     while (fi < W - 1) : (fi += 1) try writer.writeAll("─");
     try writer.writeAll("┘" ++ RESET ++ "\r\n");
 }

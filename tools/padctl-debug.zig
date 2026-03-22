@@ -146,7 +146,14 @@ pub fn main() !void {
 
     const cfg = &parsed.value;
     const interp = Interpreter.init(cfg);
-    const render_cfg = render.RenderConfig.deriveFromConfig(cfg);
+    var render_cfg = render.RenderConfig.deriveFromConfig(cfg);
+
+    // Populate output info from config
+    if (cfg.output) |out| {
+        render_cfg.output_info = .{
+            .name = out.name orelse cfg.device.name,
+        };
+    }
     const vid: u16 = @intCast(cfg.device.vid & 0xffff);
     const pid: u16 = @intCast(cfg.device.pid & 0xffff);
 
@@ -172,6 +179,11 @@ pub fn main() !void {
             std.process.exit(1);
         };
         std.log.info("mapping loaded: {s}", .{mpath});
+        if (render_cfg.output_info) |*info| {
+            info.mapping_file = mpath;
+        } else {
+            render_cfg.output_info = .{ .mapping_file = mpath };
+        }
     }
 
     // Open all interfaces
