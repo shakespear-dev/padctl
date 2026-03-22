@@ -29,7 +29,7 @@
             meta = {
               description = "HID gamepad remapper — declarative TOML config, uinput output";
               homepage = "https://github.com/BANANASJIM/padctl";
-              license = nixpkgs.lib.licenses.mit;
+              license = nixpkgs.lib.licenses.lgpl21Plus;
               maintainers = [ ];
               platforms = [ "x86_64-linux" "aarch64-linux" ];
             };

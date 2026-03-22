@@ -3,7 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        HID gamepad remapper with declarative TOML config
 
-License:        MIT
+License:        LGPL-2.1-or-later
 URL:            https://github.com/BANANASJIM/padctl
 
 %global _arch_tag %{expand:%(uname -m)}-linux-musl

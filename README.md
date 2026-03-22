@@ -197,4 +197,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a device config or contrib
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+LGPL-2.1-or-later — see [LICENSE](LICENSE).
