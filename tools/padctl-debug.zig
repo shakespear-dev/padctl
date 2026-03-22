@@ -205,10 +205,14 @@ pub fn main() !void {
         std.log.info("opened interface {d} (class={s})", .{ iface.id, iface.class });
     }
 
-    // Run init handshake on vendor-class interfaces only
+    // Run init handshake on the configured interface (or vendor-class fallback)
     if (cfg.device.init) |init_cfg| {
         for (cfg.device.interface[0..opened], devices[0..opened]) |iface, dev| {
-            if (!std.mem.eql(u8, iface.class, "vendor")) continue;
+            const match = if (init_cfg.interface) |init_iface|
+                iface.id == init_iface
+            else
+                std.mem.eql(u8, iface.class, "vendor");
+            if (!match) continue;
             init_seq.runInitSequence(allocator, dev, init_cfg) catch |err| {
                 std.log.debug("init handshake failed on interface {d}: {}, continuing", .{ iface.id, err });
             };

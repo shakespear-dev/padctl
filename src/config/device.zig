@@ -18,6 +18,8 @@ pub const InitConfig = struct {
     response_prefix: []const i64,
     enable: ?[]const u8 = null,
     disable: ?[]const u8 = null,
+    interface: ?i64 = null,
+    report_size: ?i64 = null,
 };
 
 pub const DeviceInfo = struct {

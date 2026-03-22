@@ -22,8 +22,13 @@ pub fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, retries: u16) !void {
-    try device.write(bytes);
+fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, retries: u16, report_size: usize) !void {
+    // Zero-pad to report_size to match HID output report length
+    var pad_buf: [64]u8 = .{0} ** 64;
+    const send_len = @max(bytes.len, report_size);
+    const copy_len = @min(bytes.len, pad_buf.len);
+    @memcpy(pad_buf[0..copy_len], bytes[0..copy_len]);
+    try device.write(pad_buf[0..@min(send_len, pad_buf.len)]);
     if (prefix.len == 0) {
         std.Thread.sleep(20 * std.time.ns_per_ms);
         return;
@@ -60,10 +65,12 @@ pub fn runInitSequence(
     };
     defer allocator.free(prefix);
 
+    const report_size: usize = if (init_config.report_size) |rs| @intCast(rs) else 0;
+
     for (init_config.commands) |cmd| {
         const bytes = try parseHexBytes(allocator, cmd);
         defer allocator.free(bytes);
-        sendAndWaitPrefix(device, bytes, prefix, 50) catch |err| {
+        sendAndWaitPrefix(device, bytes, prefix, 50, report_size) catch |err| {
             if (err == error.InitFailed) {
                 std.log.debug("init command got no ack, continuing", .{});
             } else return err;
@@ -75,7 +82,7 @@ pub fn runInitSequence(
     if (init_config.enable) |enable_cmd| {
         const bytes = try parseHexBytes(allocator, enable_cmd);
         defer allocator.free(bytes);
-        sendAndWaitPrefix(device, bytes, prefix, 50) catch |err| {
+        sendAndWaitPrefix(device, bytes, prefix, 50, report_size) catch |err| {
             if (err == error.InitFailed) {
                 std.log.debug("enable command got no ack, continuing", .{});
             } else return err;

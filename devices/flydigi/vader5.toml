@@ -14,6 +14,8 @@ id = 1
 class = "hid"      # hidraw; EP2 IN 32B extended input, EP6 OUT 32B config commands
 
 [device.init]
+interface = 1
+report_size = 32
 commands = [
     "5aa5 0102 03",
     "5aa5 a102 a3",
