@@ -287,6 +287,9 @@ pub const UinputDevice = struct {
     }
 
     pub fn emit(self: *UinputDevice, s: state.GamepadState) !void {
+        // worst case: 16 axes + 2 dpad + BUTTON_COUNT buttons + 1 SYN
+        comptime std.debug.assert(16 + 2 + BUTTON_COUNT + 1 <= MAX_EVENTS);
+
         var events: [MAX_EVENTS]c.input_event = undefined;
         var n: usize = 0;
 
