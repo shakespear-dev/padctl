@@ -27,6 +27,8 @@ fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, re
     var pad_buf: [64]u8 = .{0} ** 64;
     if (bytes.len > pad_buf.len)
         std.log.warn("init command {d} bytes exceeds {d}-byte buffer, truncated", .{ bytes.len, pad_buf.len });
+    if (report_size > pad_buf.len)
+        std.log.warn("report_size {d} exceeds {d}-byte buffer, write capped", .{ report_size, pad_buf.len });
     const send_len = @max(bytes.len, report_size);
     const copy_len = @min(bytes.len, pad_buf.len);
     @memcpy(pad_buf[0..copy_len], bytes[0..copy_len]);
