@@ -213,7 +213,8 @@ pub fn main() !void {
     pollfds_buf[n_devs] = .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 };
     const pollfds = pollfds_buf[0..n_fds];
 
-    while (true) {
+    var running = true;
+    while (running) {
         // Reset revents
         for (pollfds) |*pfd| pfd.revents = 0;
 
@@ -221,12 +222,23 @@ pub fn main() !void {
 
         // Check device fds
         for (0..n_devs) |i| {
+            if (pollfds[i].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                std.log.info("device disconnected", .{});
+                running = false;
+                break;
+            }
+
             if (pollfds[i].revents & posix.POLL.IN != 0) {
                 const n = devices[i].read(&raw_buf) catch |err| switch (err) {
                     error.Again => continue,
-                    error.Disconnected => break,
+                    error.Disconnected => {
+                        std.log.info("device disconnected", .{});
+                        running = false;
+                        break;
+                    },
                     error.Io => continue,
                 };
+                if (!running) break;
                 if (n > 0) {
                     const iface_id: u8 = @intCast(cfg.device.interface[i].id);
                     if (interp.processReport(iface_id, raw_buf[0..n])) |maybe_delta| {
@@ -240,6 +252,8 @@ pub fn main() !void {
                 }
             }
         }
+
+        if (!running) break;
 
         // Check stdin
         if (pollfds[n_devs].revents & posix.POLL.IN != 0) {
