@@ -23,13 +23,17 @@ test "property: renderFrame robustness — random state never crashes" {
         // Test with has_gyro=false
         {
             var stream = std.io.fixedBufferStream(&out_buf);
-            render.renderFrame(stream.writer(), &gs, raw[0..raw_len], random.boolean(), .{}) catch {};
+            render.renderFrame(stream.writer(), &gs, raw[0..raw_len], random.boolean(), .{}) catch |err| switch (err) {
+                error.NoSpaceLeft => {},
+            };
         }
 
         // Test with has_gyro=true
         {
             var stream = std.io.fixedBufferStream(&out_buf);
-            render.renderFrame(stream.writer(), &gs, raw[0..raw_len], random.boolean(), .{ .has_gyro = true }) catch {};
+            render.renderFrame(stream.writer(), &gs, raw[0..raw_len], random.boolean(), .{ .has_gyro = true }) catch |err| switch (err) {
+                error.NoSpaceLeft => {},
+            };
         }
     }
 }

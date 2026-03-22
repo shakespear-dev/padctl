@@ -69,7 +69,7 @@ pub const testing_support = struct {
     pub const interpreter_props = @import("test/properties/interpreter_props.zig");
     pub const render_props = @import("test/properties/render_props.zig");
     pub const config_props = @import("test/properties/config_props.zig");
-    pub const hidraw_props = @import("test/properties/hidraw_props.zig");
+    pub const hidraw_dedup_test = @import("test/hidraw_dedup_test.zig");
     pub const state_props = @import("test/properties/state_props.zig");
 };
 
