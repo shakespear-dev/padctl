@@ -182,17 +182,23 @@ pub fn compileTransformChain(chain: []const u8, type_tag: FieldType) CompiledTra
                 depth -= 1;
             },
             ',' => if (depth == 0) {
-                if (result.len < MAX_TRANSFORMS)
+                if (result.len < MAX_TRANSFORMS) {
                     result.items[result.len] = compileTransformSeg(std.mem.trim(u8, chain[seg_start..pos], " \t"));
-                result.len += 1;
+                    result.len += 1;
+                } else {
+                    std.log.warn("transform chain exceeds max {d}, ignoring segment", .{MAX_TRANSFORMS});
+                }
                 seg_start = pos + 1;
             },
             else => {},
         }
     }
-    if (result.len < MAX_TRANSFORMS)
+    if (result.len < MAX_TRANSFORMS) {
         result.items[result.len] = compileTransformSeg(std.mem.trim(u8, chain[seg_start..], " \t"));
-    result.len += 1;
+        result.len += 1;
+    } else {
+        std.log.warn("transform chain exceeds max {d}, ignoring segment", .{MAX_TRANSFORMS});
+    }
     return result;
 }
 
