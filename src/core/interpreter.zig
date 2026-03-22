@@ -114,24 +114,30 @@ pub fn parseFieldTag(name: []const u8) FieldTag {
     return .unknown;
 }
 
+fn saturateCast(comptime T: type, val: i64) T {
+    if (val > std.math.maxInt(T)) return std.math.maxInt(T);
+    if (val < std.math.minInt(T)) return std.math.minInt(T);
+    return @intCast(val);
+}
+
 fn applyFieldTag(delta: *GamepadStateDelta, tag: FieldTag, val: i64) void {
     switch (tag) {
-        .ax => delta.ax = @truncate(val),
-        .ay => delta.ay = @truncate(val),
-        .rx => delta.rx = @truncate(val),
-        .ry => delta.ry = @truncate(val),
+        .ax => delta.ax = saturateCast(i16, val),
+        .ay => delta.ay = saturateCast(i16, val),
+        .rx => delta.rx = saturateCast(i16, val),
+        .ry => delta.ry = saturateCast(i16, val),
         .lt => delta.lt = @intCast(val & 0xff),
         .rt => delta.rt = @intCast(val & 0xff),
-        .gyro_x => delta.gyro_x = @truncate(val),
-        .gyro_y => delta.gyro_y = @truncate(val),
-        .gyro_z => delta.gyro_z = @truncate(val),
-        .accel_x => delta.accel_x = @truncate(val),
-        .accel_y => delta.accel_y = @truncate(val),
-        .accel_z => delta.accel_z = @truncate(val),
-        .touch0_x => delta.touch0_x = @truncate(val),
-        .touch0_y => delta.touch0_y = @truncate(val),
-        .touch1_x => delta.touch1_x = @truncate(val),
-        .touch1_y => delta.touch1_y = @truncate(val),
+        .gyro_x => delta.gyro_x = saturateCast(i16, val),
+        .gyro_y => delta.gyro_y = saturateCast(i16, val),
+        .gyro_z => delta.gyro_z = saturateCast(i16, val),
+        .accel_x => delta.accel_x = saturateCast(i16, val),
+        .accel_y => delta.accel_y = saturateCast(i16, val),
+        .accel_z => delta.accel_z = saturateCast(i16, val),
+        .touch0_x => delta.touch0_x = saturateCast(i16, val),
+        .touch0_y => delta.touch0_y = saturateCast(i16, val),
+        .touch1_x => delta.touch1_x = saturateCast(i16, val),
+        .touch1_y => delta.touch1_y = saturateCast(i16, val),
         .touch0_active => delta.touch0_active = val != 0,
         .touch1_active => delta.touch1_active = val != 0,
         .battery_level => delta.battery_level = @intCast(val & 0xff),
@@ -968,7 +974,7 @@ fn makeDualSenseSample() [64]u8 {
     raw[1] = 0x00; // left_x = 0 → scale → -32768
     raw[2] = 0xFF; // left_y = 255 → scale → 32767 → negate → -32767
     raw[3] = 0xFF; // right_x = 255 → scale → 32767
-    raw[4] = 0x00; // right_y = 0 → scale → -32768 → negate → 32768 → wraps to -32768 via @truncate
+    raw[4] = 0x00; // right_y = 0 → scale → -32768 → negate → 32768 → saturates to 32767
     raw[5] = 0xC0; // lt = 192
     raw[6] = 0x80; // rt = 128
     // byte 8: bit4=Square(X), bit5=Cross(A)
@@ -1017,16 +1023,16 @@ test "DualSense USB report: axes, triggers, IMU, buttons" {
     try testing.expect(btns & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.B)))) == 0); // Circle not pressed
 }
 
-test "DualSense right_y=0x00 wraps to -32768 via @truncate" {
+test "DualSense right_y=0x00 saturates to 32767" {
     const allocator = testing.allocator;
     const parsed = try @import("../config/device.zig").parseFile(allocator, "devices/sony/dualsense.toml");
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     var raw = [_]u8{0} ** 64;
     raw[0] = 0x01;
-    raw[4] = 0x00; // right_y=0 → scale(-32768,32767) → -32768 → negate → 32768 → wraps to -32768
+    raw[4] = 0x00; // right_y=0 → scale(-32768,32767) → -32768 → negate → 32768 → saturates to 32767
     const delta = (try interp.processReport(3, &raw)) orelse return error.NoMatch;
-    try testing.expectEqual(@as(?i16, -32768), delta.ry);
+    try testing.expectEqual(@as(?i16, 32767), delta.ry);
 }
 
 test "DualSense joystick boundary values" {

@@ -13,6 +13,12 @@ fn makeToml(comptime transform: []const u8) []const u8 {
         "[report.fields]\nleft_x = { offset = 2, type = \"i16le\", transform = \"" ++ transform ++ "\" }\n";
 }
 
+fn saturateCast(val: i64) i16 {
+    if (val > std.math.maxInt(i16)) return std.math.maxInt(i16);
+    if (val < std.math.minInt(i16)) return std.math.minInt(i16);
+    return @intCast(val);
+}
+
 fn runOne(interp: *const Interpreter, val: i16) !i16 {
     var raw = [_]u8{0} ** 4;
     raw[0] = 0x01;
@@ -27,8 +33,7 @@ test "boundary: negate" {
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     inline for (boundary_i16) |v| {
-        // negate in i64 then @truncate to i16
-        const expected: i16 = @truncate(-@as(i64, v));
+        const expected: i16 = saturateCast(-@as(i64, v));
         try testing.expectEqual(expected, try runOne(&interp, v));
     }
 }
@@ -41,7 +46,7 @@ test "boundary: abs" {
     inline for (boundary_i16) |v| {
         const v64: i64 = v;
         const abs64: i64 = @intCast(@abs(v64));
-        const expected: i16 = @truncate(abs64);
+        const expected: i16 = saturateCast(abs64);
         try testing.expectEqual(expected, try runOne(&interp, v));
     }
 }
@@ -55,7 +60,7 @@ test "boundary: scale(-32768, 32767)" {
     inline for (boundary_i16) |v| {
         const v128: i128 = v;
         const scaled: i64 = @intCast(@divTrunc(v128 * (32767 - (-32768)), t_max) + (-32768));
-        const expected: i16 = @truncate(scaled);
+        const expected: i16 = saturateCast(scaled);
         try testing.expectEqual(expected, try runOne(&interp, v));
     }
 }
@@ -77,7 +82,7 @@ test "boundary: clamp(-16384, 16384)" {
     defer parsed.deinit();
     const interp = Interpreter.init(&parsed.value);
     inline for (boundary_i16) |v| {
-        const expected: i16 = @truncate(std.math.clamp(@as(i64, v), -16384, 16384));
+        const expected: i16 = saturateCast(std.math.clamp(@as(i64, v), -16384, 16384));
         try testing.expectEqual(expected, try runOne(&interp, v));
     }
 }
@@ -103,7 +108,7 @@ test "boundary: chain negate, abs" {
         // negate then abs: abs(-v) in i64
         const negated: i64 = -@as(i64, v);
         const abs_val: i64 = @intCast(@abs(negated));
-        const expected: i16 = @truncate(abs_val);
+        const expected: i16 = saturateCast(abs_val);
         try testing.expectEqual(expected, try runOne(&interp, v));
     }
 }
@@ -126,7 +131,7 @@ test "boundary: chain deadzone(1000), scale(-32768, 32767)" {
     const interp = Interpreter.init(&parsed.value);
     // dead inputs (|v| < 1000) should produce the scaled value of 0
     const t_max: i64 = 32767;
-    const scaled_zero: i16 = @truncate(@as(i64, @intCast(@divTrunc(@as(i128, 0) * (32767 - (-32768)), t_max) + (-32768))));
+    const scaled_zero: i16 = saturateCast(@as(i64, @intCast(@divTrunc(@as(i128, 0) * (32767 - (-32768)), t_max) + (-32768))));
     const dead_vals = [_]i16{ 0, 999, -999 };
     inline for (dead_vals) |v| {
         try testing.expectEqual(scaled_zero, try runOne(&interp, v));
