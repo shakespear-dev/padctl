@@ -8,6 +8,7 @@ const DeviceConfig = @import("config/device.zig").DeviceConfig;
 const config_device = @import("config/device.zig");
 const HidrawDevice = @import("io/hidraw.zig").HidrawDevice;
 const readPhysicalPath = @import("io/hidraw.zig").readPhysicalPath;
+const readInterfaceId = @import("io/hidraw.zig").readInterfaceId;
 const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
@@ -618,8 +619,21 @@ pub const Supervisor = struct {
                 continue;
             }
 
+            const cfg_ifaces = cfg_ptr.value.device.interface;
+
             var spawned: usize = 0;
             for (paths) |hidraw_path| {
+                if (readInterfaceId(hidraw_path)) |iface_id| {
+                    var declared = false;
+                    for (cfg_ifaces) |ci| {
+                        if (iface_id == @as(u8, @intCast(ci.id))) {
+                            declared = true;
+                            break;
+                        }
+                    }
+                    if (!declared) continue;
+                }
+
                 const phys = readPhysicalPath(self.allocator, hidraw_path) catch |err| {
                     std.log.warn("readPhysicalPath {s}: {}", .{ hidraw_path, err });
                     continue;

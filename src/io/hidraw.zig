@@ -244,7 +244,18 @@ pub fn readPhysicalPath(allocator: std.mem.Allocator, path: []const u8) ![]const
     var buf: [256]u8 = std.mem.zeroes([256]u8);
     _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&buf));
     const phys = std.mem.sliceTo(&buf, 0);
-    return allocator.dupe(u8, stripInputSuffix(phys));
+    const stripped = stripInputSuffix(phys);
+    if (stripped.len == 0) return allocator.dupe(u8, path);
+    return allocator.dupe(u8, stripped);
+}
+
+/// Read the interface number from HIDIOCGRAWPHYS for a hidraw node.
+pub fn readInterfaceId(path: []const u8) ?u8 {
+    const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch return null;
+    defer posix.close(fd);
+    var buf: [256]u8 = std.mem.zeroes([256]u8);
+    _ = linux.ioctl(fd, ioctl.HIDIOCGRAWPHYS, @intFromPtr(&buf));
+    return parseInterfaceId(std.mem.sliceTo(&buf, 0));
 }
 
 /// Strip trailing "/inputN" suffix from a physical path for dedup.
