@@ -245,13 +245,16 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         }
 
         if (report.button_group) |bg| {
+            const bg_source_size = bg.source.size;
             const is_generic = if (cfg.device.mode) |m| std.mem.eql(u8, m, "generic") else false;
-            if (!is_generic) {
-                var it = bg.map.map.iterator();
-                while (it.next()) |entry| {
+            var it = bg.map.map.iterator();
+            while (it.next()) |entry| {
+                if (!is_generic) {
                     const btn_name = entry.key_ptr.*;
                     _ = std.meta.stringToEnum(ButtonId, btn_name) orelse return error.InvalidConfig;
                 }
+                const bit_val = entry.value_ptr.*;
+                if (bit_val < 0 or bit_val >= bg_source_size * 8) return error.InvalidConfig;
             }
         }
 
