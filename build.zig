@@ -170,6 +170,13 @@ pub fn build(b: *std.Build) void {
     const fmt = b.addFmt(.{ .paths = &.{ "src/", "tools/" }, .check = true });
     fmt_step.dependOn(&fmt.step);
 
+    // check-all: single CI gate (test + tsan + safe + fmt)
+    const check_all = b.step("check-all", "Run all checks (test + tsan + safe + fmt)");
+    check_all.dependOn(test_step);
+    check_all.dependOn(tsan_step);
+    check_all.dependOn(safe_step);
+    check_all.dependOn(fmt_step);
+
     // capture L0 tests (analyse pure functions)
     const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod });
     if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
