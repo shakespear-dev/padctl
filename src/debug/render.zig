@@ -339,7 +339,7 @@ pub fn renderFrame(
     // Raw hex
     try sectionHeader(writer, "Raw Hex");
     try writer.writeAll("│ ");
-    const show = @min(raw.len, 16);
+    const show: usize = @min(raw.len, 16);
     for (raw[0..show]) |b| {
         try writer.print("{x:0>2} ", .{b});
     }
@@ -347,7 +347,7 @@ pub fn renderFrame(
 
     if (raw.len > 16) {
         try writer.writeAll("│ ");
-        const show2 = @min(raw.len - 16, 16);
+        const show2: usize = @min(raw.len - 16, 16);
         for (raw[16 .. 16 + show2]) |b| {
             try writer.print("{x:0>2} ", .{b});
         }
