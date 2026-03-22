@@ -178,7 +178,7 @@ test "T3: renderFrame — ANSI sequences present" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
-    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false);
+    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false, .{}, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[") != null);
 }
@@ -190,7 +190,7 @@ test "T3: renderFrame — correct axis values rendered" {
     gs.ax = -1234;
     gs.ry = 5678;
     gs.gyro_x = 2345;
-    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false);
+    try render_mod.renderFrame(fbs.writer(), &gs, &[_]u8{}, false, .{}, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "-1234") != null);
     try testing.expect(std.mem.indexOf(u8, out, "5678") != null);
@@ -207,8 +207,8 @@ test "T3: renderFrame — pressed button differs from released" {
     gs_on.buttons = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.A)));
     var gs_off = GamepadState{};
 
-    try render_mod.renderFrame(fbs_on.writer(), &gs_on, &[_]u8{}, false);
-    try render_mod.renderFrame(fbs_off.writer(), &gs_off, &[_]u8{}, false);
+    try render_mod.renderFrame(fbs_on.writer(), &gs_on, &[_]u8{}, false, .{}, .raw);
+    try render_mod.renderFrame(fbs_off.writer(), &gs_off, &[_]u8{}, false, .{}, .raw);
 
     try testing.expect(!std.mem.eql(u8, fbs_on.getWritten(), fbs_off.getWritten()));
 }

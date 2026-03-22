@@ -4,8 +4,10 @@ const linux = std.os.linux;
 
 const src = @import("src");
 const device_config = src.config.device;
+const mapping_config = src.config.mapping;
 const InterfaceConfig = device_config.InterfaceConfig;
 const Interpreter = src.core.interpreter.Interpreter;
+const Mapper = src.core.mapper.Mapper;
 const GamepadState = src.core.state.GamepadState;
 const DeviceIO = src.io.device_io.DeviceIO;
 const HidrawDevice = src.io.hidraw.HidrawDevice;
@@ -86,6 +88,7 @@ fn createDeviceIO(
 
 const Cli = struct {
     config_path: ?[]const u8 = null,
+    mapping_path: ?[]const u8 = null,
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !Cli {
@@ -96,15 +99,18 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
             cli.config_path = args.next() orelse return error.MissingArgValue;
+        } else if (std.mem.eql(u8, arg, "--mapping")) {
+            cli.mapping_path = args.next() orelse return error.MissingArgValue;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             const help =
-                \\Usage: padctl-debug --config <path>
+                \\Usage: padctl-debug --config <path> [--mapping <path>]
                 \\
                 \\  --config <path>      Device config TOML (required)
+                \\  --mapping <path>     Mapping config TOML (optional, enables mapped view)
                 \\  --help               Show this help
                 \\
                 \\Opens all interfaces from config (vendor via libusb, HID via hidraw).
-                \\Keys: Q = quit, R = toggle rumble test
+                \\Keys: Q = quit, R = toggle rumble test, M = toggle raw/mapped view
                 \\
             ;
             _ = posix.write(posix.STDOUT_FILENO, help) catch 0;
@@ -143,6 +149,30 @@ pub fn main() !void {
     const render_cfg = render.RenderConfig.deriveFromConfig(cfg);
     const vid: u16 = @intCast(cfg.device.vid & 0xffff);
     const pid: u16 = @intCast(cfg.device.pid & 0xffff);
+
+    // Load mapping config and create mapper if --mapping provided
+    var mapping_parsed: ?mapping_config.ParseResult = null;
+    defer if (mapping_parsed) |mp| mp.deinit();
+
+    var mapper: ?Mapper = null;
+    defer if (mapper) |*m| m.deinit();
+
+    if (cli.mapping_path) |mpath| {
+        mapping_parsed = mapping_config.parseFile(allocator, mpath) catch |err| {
+            std.log.err("failed to parse mapping '{s}': {}", .{ mpath, err });
+            std.process.exit(1);
+        };
+        const timer_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch |err| {
+            std.log.err("failed to create timerfd: {}", .{err});
+            std.process.exit(1);
+        };
+        mapper = Mapper.init(&mapping_parsed.?.value, timer_fd, allocator) catch |err| {
+            std.log.err("failed to init mapper: {}", .{err});
+            posix.close(timer_fd);
+            std.process.exit(1);
+        };
+        std.log.info("mapping loaded: {s}", .{mpath});
+    }
 
     // Open all interfaces
     const devices = allocator.alloc(DeviceIO, cfg.device.interface.len) catch |err| {
@@ -193,10 +223,12 @@ pub fn main() !void {
     defer _ = posix.write(stdout_fd, "\x1b[?25h\x1b[0m") catch 0;
 
     var gs = GamepadState{};
+    var mapped_gs = GamepadState{};
     var raw_buf: [256]u8 = undefined;
     var last_raw_storage: [256]u8 = undefined;
     var last_raw_len: usize = 0;
     var rumble_on = false;
+    var view_mode: render.ViewMode = .raw;
     var last_render: i64 = 0;
 
     var frame_buf: [8192]u8 = undefined;
@@ -245,6 +277,12 @@ pub fn main() !void {
                         if (maybe_delta) |delta| {
                             gs.applyDelta(delta);
                             gs.synthesizeDpadAxes();
+                            if (mapper) |*m| {
+                                if (m.apply(delta, 16)) |out| {
+                                    mapped_gs = out.gamepad;
+                                    mapped_gs.synthesizeDpadAxes();
+                                } else |_| {}
+                            }
                         }
                     } else |_| {}
                     @memcpy(last_raw_storage[0..n], raw_buf[0..n]);
@@ -268,6 +306,11 @@ pub fn main() !void {
                             sendRumble(vd, if (rumble_on) 0x80 else 0x00, if (rumble_on) 0x80 else 0x00);
                         }
                     },
+                    'm', 'M' => {
+                        if (mapper != null) {
+                            view_mode = if (view_mode == .raw) .mapped else .raw;
+                        }
+                    },
                     else => {},
                 }
             }
@@ -277,7 +320,8 @@ pub fn main() !void {
         if (now - last_render >= 16) {
             last_render = now;
             fbs.reset();
-            render.renderFrame(writer, &gs, last_raw_storage[0..last_raw_len], rumble_on, render_cfg) catch {};
+            const display_gs = if (view_mode == .mapped and mapper != null) &mapped_gs else &gs;
+            render.renderFrame(writer, display_gs, last_raw_storage[0..last_raw_len], rumble_on, render_cfg, view_mode) catch {};
             _ = posix.write(stdout_fd, fbs.getWritten()) catch {};
         }
     }

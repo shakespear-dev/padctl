@@ -448,6 +448,7 @@ pub fn main() !void {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("test/bugfix_regression_test.zig");
 }
 
 // --- CLI tests ---

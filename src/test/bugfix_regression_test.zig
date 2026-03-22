@@ -9,8 +9,8 @@ test "renderFrame: empty raw slice does not panic" {
     var buf: [8192]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var gs = render.GamepadState{};
-    try render.renderFrame(fbs.writer(), &gs, &.{}, false, .{});
-    try render.renderFrame(fbs.writer(), &gs, &[_]u8{0x42}, true, .{});
+    try render.renderFrame(fbs.writer(), &gs, &.{}, false, .{}, .raw);
+    try render.renderFrame(fbs.writer(), &gs, &[_]u8{0x42}, true, .{}, .raw);
 }
 
 // -- Test 2: stripInputSuffix strips /inputN --
@@ -51,8 +51,10 @@ test "walker: finds toml files in subdirectories" {
     try tmp.dir.writeFile(.{ .sub_path = "sub/deep/deep.toml", .data = "" });
     try tmp.dir.writeFile(.{ .sub_path = "sub/ignore.txt", .data = "" });
 
-    // Use Walker to traverse and collect .toml files
-    var walker = try tmp.dir.walk(testing.allocator);
+    // Reopen with iterate permission for walker
+    var iter_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    defer iter_dir.close();
+    var walker = try iter_dir.walk(testing.allocator);
     defer walker.deinit();
 
     var toml_count: usize = 0;

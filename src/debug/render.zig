@@ -127,12 +127,15 @@ fn sectionHeader(writer: anytype, title: []const u8) !void {
     try writer.writeAll("┤" ++ RESET ++ "\r\n");
 }
 
+pub const ViewMode = enum { raw, mapped };
+
 pub fn renderFrame(
     writer: anytype,
     gs: *const GamepadState,
     raw: []const u8,
     rumble_on: bool,
     config: RenderConfig,
+    view_mode: ViewMode,
 ) !void {
     try clearScreen(writer);
 
@@ -361,8 +364,12 @@ pub fn renderFrame(
     } else {
         try writer.writeAll(" [Q]uit  [R]umble OFF ");
     }
+    switch (view_mode) {
+        .raw => try writer.writeAll(" [M]ode: RAW "),
+        .mapped => try writer.writeAll(YELLOW ++ " [M]ode: MAPPED " ++ RESET),
+    }
     try writer.writeAll(BOLD ++ CYAN);
-    var fi: usize = 23; // └(1) + text(22) = 23 visible
+    var fi: usize = 37; // └(1) + rumble(22) + mode(14) = 37 visible
     while (fi < W - 1) : (fi += 1) try writer.writeAll("─");
     try writer.writeAll("┘" ++ RESET ++ "\r\n");
 }
@@ -397,7 +404,7 @@ test "renderFrame: contains axis values" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{ 0x5a, 0xa5, 0xef, 0x01, 0x02 };
-    try renderFrame(fbs.writer(), &gs, &raw, false, default_config);
+    try renderFrame(fbs.writer(), &gs, &raw, false, default_config, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "1234") != null);
     try testing.expect(std.mem.indexOf(u8, out, "-567") != null);
@@ -410,7 +417,7 @@ test "renderFrame: contains trigger values" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false, default_config);
+    try renderFrame(fbs.writer(), &gs, &raw, false, default_config, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "128") != null);
     try testing.expect(std.mem.indexOf(u8, out, "64") != null);
@@ -421,7 +428,7 @@ test "renderFrame: contains gyro values" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false, default_config);
+    try renderFrame(fbs.writer(), &gs, &raw, false, default_config, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "100") != null);
     try testing.expect(std.mem.indexOf(u8, out, "-200") != null);
@@ -433,7 +440,7 @@ test "renderFrame: no gyro section when disabled" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = makeTestState();
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false, .{});
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{}, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "Gyro") == null);
     try testing.expect(std.mem.indexOf(u8, out, "GX") == null);
@@ -446,7 +453,7 @@ test "renderFrame: touchpad section when enabled" {
     gs.touch0_x = 500;
     gs.touch0_active = true;
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false, .{ .has_touchpad = true });
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{ .has_touchpad = true }, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "Touchpad") != null);
     try testing.expect(std.mem.indexOf(u8, out, "500") != null);
@@ -457,7 +464,7 @@ test "renderFrame: contains raw hex bytes" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
     const raw = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
-    try renderFrame(fbs.writer(), &gs, &raw, false, .{});
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{}, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "de") != null);
     try testing.expect(std.mem.indexOf(u8, out, "ad") != null);
@@ -470,7 +477,7 @@ test "renderFrame: rumble_on shows rumble indicator" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, true, .{});
+    try renderFrame(fbs.writer(), &gs, &raw, true, .{}, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "ON") != null);
 }
@@ -480,7 +487,7 @@ test "renderFrame: contains ANSI escape sequences" {
     var fbs = std.io.fixedBufferStream(&buf);
     const gs = GamepadState{};
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false, .{});
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{}, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "\x1b[") != null);
 }
@@ -497,8 +504,8 @@ test "renderFrame: pressed button highlighted differently" {
     gs_released.buttons = 0;
 
     const raw = [_]u8{};
-    try renderFrame(fbs1.writer(), &gs_pressed, &raw, false, .{});
-    try renderFrame(fbs2.writer(), &gs_released, &raw, false, .{});
+    try renderFrame(fbs1.writer(), &gs_pressed, &raw, false, .{}, .raw);
+    try renderFrame(fbs2.writer(), &gs_released, &raw, false, .{}, .raw);
 
     try testing.expect(!std.mem.eql(u8, fbs1.getWritten(), fbs2.getWritten()));
 }
@@ -509,7 +516,7 @@ test "renderFrame: extended buttons shown when configured" {
     var gs = GamepadState{};
     gs.buttons = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.C)));
     const raw = [_]u8{};
-    try renderFrame(fbs.writer(), &gs, &raw, false, .{ .has_c = true, .has_z = true });
+    try renderFrame(fbs.writer(), &gs, &raw, false, .{ .has_c = true, .has_z = true }, .raw);
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "[C]") != null);
     try testing.expect(std.mem.indexOf(u8, out, "[Z]") != null);
