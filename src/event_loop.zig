@@ -237,10 +237,12 @@ pub const EventLoop = struct {
             null;
 
         while (self.running) {
+            std.log.info("ppoll: fd_count={d}, timeout={?}", .{ self.fd_count, if (timeout) |t| t.sec else null });
             _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
+            std.log.info("ppoll returned", .{});
 
             const now = std.time.nanoTimestamp();
             const dt_ns = now - self.last_ts;

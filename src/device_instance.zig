@@ -186,6 +186,8 @@ pub const DeviceInstance = struct {
     /// Thread entry point. Runs the event loop; applies pending mapping swaps
     /// between iterations (woken via stop_pipe by updateMapping).
     pub fn run(self: *DeviceInstance) !void {
+        std.log.info("DeviceInstance.run entered, devices={d}", .{self.devices.len});
+        defer std.log.info("DeviceInstance.run exiting", .{});
         while (!@atomicLoad(bool, &self.stopped, .acquire)) {
             // Apply pending mapping before processing any fds
             if (@atomicLoad(?*MappingConfig, &self.pending_mapping, .acquire)) |new| {
@@ -207,6 +209,7 @@ pub const DeviceInstance = struct {
 
             const mcfg: ?*const MappingConfig = if (mapper_ptr) |m| m.config else self.mapping_cfg;
 
+            std.log.info("entering event loop iteration", .{});
             try self.loop.run(.{
                 .devices = self.devices,
                 .interpreter = &self.interp,
@@ -221,6 +224,7 @@ pub const DeviceInstance = struct {
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
             });
+            std.log.info("event loop returned, disconnected={}", .{self.loop.disconnected});
             if (self.loop.disconnected) break;
         }
     }
