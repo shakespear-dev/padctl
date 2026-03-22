@@ -241,7 +241,6 @@ pub const EventLoop = struct {
                 error.SignalInterrupt => continue,
                 else => {
                     std.log.err("ppoll failed: {}", .{err});
-                    self.running = false;
                     break;
                 },
             };
