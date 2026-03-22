@@ -187,36 +187,101 @@ pub fn main() !void {
         }
     }
 
-    // Populate button labels for mapped view: output.buttons as base, remap as override
+    // Build mapped button list for mapped view
+    var mapped_btn_buf: [64]render.MappedButton = undefined;
+    var mapped_btn_count: usize = 0;
+
     if (cfg.output) |out| {
         if (out.buttons) |buttons| {
+            // Start with output.buttons: each maps a ButtonId to an event code
             var it = buttons.map.iterator();
             while (it.next()) |entry| {
                 if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
-                    render_cfg.button_labels[@intFromEnum(btn)] = entry.value_ptr.*;
-                }
-            }
-        }
-    }
-    if (mapping_parsed) |mp| {
-        if (mp.value.remap) |remap| {
-            var it = remap.map.iterator();
-            while (it.next()) |entry| {
-                if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
-                    const target = entry.value_ptr.*;
-                    if (std.mem.eql(u8, target, "disabled")) {
-                        render_cfg.button_labels[@intFromEnum(btn)] = "---";
-                    } else if (std.meta.stringToEnum(ButtonId, target)) |target_btn| {
-                        // Remap to another button: use that button's output label
-                        render_cfg.button_labels[@intFromEnum(btn)] =
-                            render_cfg.button_labels[@intFromEnum(target_btn)] orelse target;
-                    } else {
-                        // Event code name (KEY_SPACE, BTN_LEFT, etc.)
-                        render_cfg.button_labels[@intFromEnum(btn)] = target;
+                    var event_code = entry.value_ptr.*;
+
+                    // Apply remap override if mapping is loaded
+                    if (mapping_parsed) |mp| {
+                        if (mp.value.remap) |remap| {
+                            if (remap.map.get(entry.key_ptr.*)) |target| {
+                                if (std.mem.eql(u8, target, "disabled")) {
+                                    continue; // skip disabled buttons
+                                }
+                                // If remapped to another ButtonId, resolve its output event code
+                                if (std.meta.stringToEnum(ButtonId, target)) |_| {
+                                    if (buttons.map.get(target)) |resolved| {
+                                        event_code = resolved;
+                                    } else {
+                                        event_code = target;
+                                    }
+                                } else {
+                                    event_code = target;
+                                }
+                            }
+                        }
+                    }
+
+                    if (mapped_btn_count < mapped_btn_buf.len) {
+                        const short = render.shortenEventCode(event_code);
+                        var mb = render.MappedButton{
+                            .btn_id = btn,
+                            .category = render.categorizeEventCode(event_code),
+                            .label_len = @intCast(short.len),
+                        };
+                        @memcpy(mb.short_label[0..short.len], short);
+                        mapped_btn_buf[mapped_btn_count] = mb;
+                        mapped_btn_count += 1;
                     }
                 }
             }
         }
+
+        // Add buttons from remap that aren't in output.buttons (e.g. back paddles → KEY_*)
+        if (mapping_parsed) |mp| {
+            if (mp.value.remap) |remap| {
+                var it = remap.map.iterator();
+                while (it.next()) |entry| {
+                    if (std.meta.stringToEnum(ButtonId, entry.key_ptr.*)) |btn| {
+                        const target = entry.value_ptr.*;
+                        if (std.mem.eql(u8, target, "disabled")) continue;
+
+                        // Skip if already added from output.buttons
+                        var already = false;
+                        for (mapped_btn_buf[0..mapped_btn_count]) |existing| {
+                            if (existing.btn_id == btn) {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (already) continue;
+
+                        // Determine event code
+                        var event_code = target;
+                        if (std.meta.stringToEnum(ButtonId, target)) |_| {
+                            if (out.buttons) |buttons| {
+                                if (buttons.map.get(target)) |resolved| {
+                                    event_code = resolved;
+                                }
+                            }
+                        }
+
+                        if (mapped_btn_count < mapped_btn_buf.len) {
+                            const short = render.shortenEventCode(event_code);
+                            var mb = render.MappedButton{
+                                .btn_id = btn,
+                                .category = render.categorizeEventCode(event_code),
+                                .label_len = @intCast(short.len),
+                            };
+                            @memcpy(mb.short_label[0..short.len], short);
+                            mapped_btn_buf[mapped_btn_count] = mb;
+                            mapped_btn_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (mapped_btn_count > 0) {
+        render_cfg.mapped_buttons = mapped_btn_buf[0..mapped_btn_count];
     }
 
     // Open all interfaces

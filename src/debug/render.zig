@@ -25,6 +25,10 @@ const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
 fn shortenLabel(label: []const u8) []const u8 {
+    return shortenEventCode(label);
+}
+
+pub fn shortenEventCode(label: []const u8) []const u8 {
     const map = .{
         .{ "BTN_SOUTH", "S" },
         .{ "BTN_EAST", "E" },
@@ -39,6 +43,7 @@ fn shortenLabel(label: []const u8) []const u8 {
         .{ "BTN_MODE", "HM" },
         .{ "BTN_LEFT", "ML" },
         .{ "BTN_RIGHT", "MR" },
+        .{ "BTN_MIDDLE", "MM" },
         .{ "BTN_TRIGGER_HAPPY1", "H1" },
         .{ "BTN_TRIGGER_HAPPY2", "H2" },
         .{ "BTN_TRIGGER_HAPPY3", "H3" },
@@ -52,6 +57,18 @@ fn shortenLabel(label: []const u8) []const u8 {
         .{ "KEY_ENTER", "ENT" },
         .{ "KEY_ESC", "ESC" },
         .{ "KEY_TAB", "TAB" },
+        .{ "KEY_F1", "F1" },
+        .{ "KEY_F2", "F2" },
+        .{ "KEY_F3", "F3" },
+        .{ "KEY_F4", "F4" },
+        .{ "KEY_F5", "F5" },
+        .{ "KEY_F6", "F6" },
+        .{ "KEY_F7", "F7" },
+        .{ "KEY_F8", "F8" },
+        .{ "KEY_F9", "F9" },
+        .{ "KEY_F10", "F10" },
+        .{ "KEY_F11", "F11" },
+        .{ "KEY_F12", "F12" },
         .{ "KEY_F13", "F13" },
         .{ "KEY_F14", "F14" },
     };
@@ -61,9 +78,40 @@ fn shortenLabel(label: []const u8) []const u8 {
     // KEY_X → "X" (strip KEY_ prefix, max 4 chars)
     if (label.len > 4 and mem.eql(u8, label[0..4], "KEY_"))
         return label[4..@min(label.len, 8)];
+    // BTN_ prefix: strip and take first 4 chars
+    if (label.len > 4 and mem.eql(u8, label[0..4], "BTN_"))
+        return label[4..@min(label.len, 8)];
     // Truncate anything else to 4 chars
     return label[0..@min(label.len, 4)];
 }
+
+pub const OutputCategory = enum { gamepad, keyboard, mouse };
+
+pub fn categorizeEventCode(code: []const u8) OutputCategory {
+    // Mouse buttons
+    if (mem.eql(u8, code, "BTN_LEFT") or
+        mem.eql(u8, code, "BTN_RIGHT") or
+        mem.eql(u8, code, "BTN_MIDDLE") or
+        mem.eql(u8, code, "mouse_left") or
+        mem.eql(u8, code, "mouse_right") or
+        mem.eql(u8, code, "mouse_middle") or
+        mem.eql(u8, code, "mouse_side")) return .mouse;
+    // Keyboard
+    if (code.len > 4 and mem.eql(u8, code[0..4], "KEY_")) return .keyboard;
+    // Everything else is gamepad
+    return .gamepad;
+}
+
+pub const MappedButton = struct {
+    short_label: [8]u8 = .{0} ** 8,
+    label_len: u8 = 0,
+    btn_id: ButtonId,
+    category: OutputCategory,
+
+    pub fn getLabel(self: *const MappedButton) []const u8 {
+        return self.short_label[0..self.label_len];
+    }
+};
 
 pub const OutputInfo = struct {
     name: []const u8 = "Unknown",
@@ -82,6 +130,7 @@ pub const RenderConfig = struct {
     has_o: bool = false,
     output_info: ?OutputInfo = null,
     button_labels: [button_id_count]?[]const u8 = .{null} ** button_id_count,
+    mapped_buttons: ?[]const MappedButton = null,
 
     pub fn hasExtButtons(self: RenderConfig) bool {
         return self.has_c or self.has_z or self.has_lm or self.has_rm or self.has_o;
@@ -192,55 +241,45 @@ pub fn renderFrame(
     view_mode: ViewMode,
 ) !void {
     try clearScreen(writer);
-    const ml = view_mode == .mapped;
 
-    // Header: show output device name in mapped mode
     if (view_mode == .mapped) {
-        if (config.output_info) |info| {
-            // ┌─ Output: <name> ──...──┐  (W=70)
-            const prefix = "┌─ Output: ";
-            const max_name = W - 4 - 11; // 4 = "─┐" + margins, 11 = prefix visible len
-            const name_len = @min(info.name.len, max_name);
-            try writer.writeAll(BOLD ++ CYAN ++ prefix);
-            try writer.writeAll(info.name[0..name_len]);
-            try writer.writeAll(" ");
-            const used = 11 + name_len + 1;
-            var hi: usize = used;
-            while (hi < W - 1) : (hi += 1) try writer.writeAll("─");
-            try writer.writeAll("┐\r\n" ++ RESET);
-        } else {
-            try writer.writeAll(BOLD ++ CYAN ++
-                "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
-                RESET);
-        }
+        try renderMappedMode(writer, gs, raw, rumble_on, config);
     } else {
-        // ┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐
-        // 1 + 19 + 1 + 14 + 1 + 33 + 1 = 70
-        try writer.writeAll(BOLD ++ CYAN ++
-            "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
-            RESET);
+        try renderRawMode(writer, gs, raw, rumble_on, config);
     }
+}
+
+fn renderRawMode(
+    writer: anytype,
+    gs: *const GamepadState,
+    raw: []const u8,
+    rumble_on: bool,
+    config: RenderConfig,
+) !void {
+    try writer.writeAll(BOLD ++ CYAN ++
+        "┌─ Sticks ──────────┬─ Triggers ───┬─ Buttons ───────────────────────┐\r\n" ++
+        RESET);
 
     // Row 1: LX / LT bar / A B X Y
     {
         try writer.writeAll("│ LX:");
         try writer.print("{:>6}", .{gs.ax});
-        try pad(writer, 11, CL); // 11 visible, pad to 20
+        try pad(writer, 11, CL);
         try writer.writeAll("│ LT ");
-        try bar(writer, gs.lt, 9); // 9-wide bar
-        try pad(writer, CL + 14, CL + CM); // CL+14=34, pad to 35 if needed
+        try bar(writer, gs.lt, 9);
+        try pad(writer, CL + 14, CL + CM);
         try writer.writeAll("│ ");
-        var col: usize = CR_START + 2; // 37
-        col += try btnLabel(writer, gs, .A, if (ml) config.btnDisplayLabel(.A, "A") else "A");
+        var col: usize = CR_START + 2;
+        col += try btnLabel(writer, gs, .A, "A");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .B, if (ml) config.btnDisplayLabel(.B, "B") else "B");
+        col += try btnLabel(writer, gs, .B, "B");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .X, if (ml) config.btnDisplayLabel(.X, "X") else "X");
+        col += try btnLabel(writer, gs, .X, "X");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Y, if (ml) config.btnDisplayLabel(.Y, "Y") else "Y");
+        col += try btnLabel(writer, gs, .Y, "Y");
         try closeRow(writer, col);
     }
 
@@ -254,16 +293,16 @@ pub fn renderFrame(
         try pad(writer, CL + 14, CL + CM);
         try writer.writeAll("│ ");
         var col: usize = CR_START + 2;
-        col += try btnLabel(writer, gs, .LB, if (ml) config.btnDisplayLabel(.LB, "LB") else "LB");
+        col += try btnLabel(writer, gs, .LB, "LB");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .RB, if (ml) config.btnDisplayLabel(.RB, "RB") else "RB");
+        col += try btnLabel(writer, gs, .RB, "RB");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Start, if (ml) config.btnDisplayLabel(.Start, "START") else "START");
+        col += try btnLabel(writer, gs, .Start, "START");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Select, if (ml) config.btnDisplayLabel(.Select, "SEL") else "SEL");
+        col += try btnLabel(writer, gs, .Select, "SEL");
         try closeRow(writer, col);
     }
 
@@ -272,7 +311,6 @@ pub fn renderFrame(
         try writer.writeAll("│ RX:");
         try writer.print("{:>6}", .{gs.rx});
         try pad(writer, 11, CL);
-        // Mid: │LT:xxx RT:xxx  = 1+3+3+4+3 = 14, pad to 15
         try writer.writeAll("│LT:");
         try writer.print("{:>3}", .{gs.lt});
         try writer.writeAll(" RT:");
@@ -280,13 +318,13 @@ pub fn renderFrame(
         try pad(writer, CL + 14, CL + CM);
         try writer.writeAll("│ ");
         var col: usize = CR_START + 2;
-        col += try btnLabel(writer, gs, .LS, if (ml) config.btnDisplayLabel(.LS, "L3") else "L3");
+        col += try btnLabel(writer, gs, .LS, "L3");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .RS, if (ml) config.btnDisplayLabel(.RS, "R3") else "R3");
+        col += try btnLabel(writer, gs, .RS, "R3");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .Home, if (ml) config.btnDisplayLabel(.Home, "HOME") else "HOME");
+        col += try btnLabel(writer, gs, .Home, "HOME");
         try closeRow(writer, col);
     }
 
@@ -295,19 +333,18 @@ pub fn renderFrame(
         try writer.writeAll("│ RY:");
         try writer.print("{:>6}", .{gs.ry});
         try pad(writer, 11, CL);
-        // ├─ DPad ───────┤ = CM+1 visible (┤ at CR_START), then 1 space
         try writer.writeAll("├─ DPad ───────┤ ");
         var col: usize = CR_START + 1;
-        col += try btnLabel(writer, gs, .M1, if (ml) config.btnDisplayLabel(.M1, "M1") else "M1");
+        col += try btnLabel(writer, gs, .M1, "M1");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .M2, if (ml) config.btnDisplayLabel(.M2, "M2") else "M2");
+        col += try btnLabel(writer, gs, .M2, "M2");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .M3, if (ml) config.btnDisplayLabel(.M3, "M3") else "M3");
+        col += try btnLabel(writer, gs, .M3, "M3");
         try writer.writeAll(" ");
         col += 1;
-        col += try btnLabel(writer, gs, .M4, if (ml) config.btnDisplayLabel(.M4, "M4") else "M4");
+        col += try btnLabel(writer, gs, .M4, "M4");
         try closeRow(writer, col);
     }
 
@@ -320,32 +357,31 @@ pub fn renderFrame(
         if (up_p) try writer.writeAll(GREEN ++ "↑" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
         try pad(writer, CL + 8, CR_START);
         try writer.writeAll("│");
-        // right section: ext buttons or empty
         if (config.hasExtButtons()) {
             try writer.writeAll(" ");
             var col: usize = CR_START + 2;
             if (config.has_c) {
-                col += try btnLabel(writer, gs, .C, if (ml) config.btnDisplayLabel(.C, "C") else "C");
+                col += try btnLabel(writer, gs, .C, "C");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_z) {
-                col += try btnLabel(writer, gs, .Z, if (ml) config.btnDisplayLabel(.Z, "Z") else "Z");
+                col += try btnLabel(writer, gs, .Z, "Z");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_lm) {
-                col += try btnLabel(writer, gs, .LM, if (ml) config.btnDisplayLabel(.LM, "LM") else "LM");
+                col += try btnLabel(writer, gs, .LM, "LM");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_rm) {
-                col += try btnLabel(writer, gs, .RM, if (ml) config.btnDisplayLabel(.RM, "RM") else "RM");
+                col += try btnLabel(writer, gs, .RM, "RM");
                 try writer.writeAll(" ");
                 col += 1;
             }
             if (config.has_o) {
-                col += try btnLabel(writer, gs, .O, if (ml) config.btnDisplayLabel(.O, "O") else "O");
+                col += try btnLabel(writer, gs, .O, "O");
             }
             try closeRow(writer, col);
         } else {
@@ -380,10 +416,340 @@ pub fn renderFrame(
         try closeRow(writer, CR_START + 1);
     }
 
+    try renderTail(writer, gs, raw, rumble_on, config, .raw);
+}
+
+const RIGHT_INNER = W - CR_START - 2; // 33 usable chars in right column
+
+fn renderMappedMode(
+    writer: anytype,
+    gs: *const GamepadState,
+    raw: []const u8,
+    rumble_on: bool,
+    config: RenderConfig,
+) !void {
+    // Build right-column lines from mapped_buttons grouped by category
+    // Each line: content for the right column (up to RIGHT_INNER visible chars)
+    const max_right_lines = 16;
+    var right_lines: [max_right_lines]RightLine = undefined;
+    var right_count: usize = 0;
+
+    if (config.mapped_buttons) |buttons| {
+        // Count per category
+        var gp_count: usize = 0;
+        var kb_count: usize = 0;
+        var ms_count: usize = 0;
+        for (buttons) |mb| {
+            switch (mb.category) {
+                .gamepad => gp_count += 1,
+                .keyboard => kb_count += 1,
+                .mouse => ms_count += 1,
+            }
+        }
+
+        // Gamepad section
+        if (gp_count > 0) {
+            if (right_count < max_right_lines) {
+                right_lines[right_count] = .{ .kind = .header, .text = "Gamepad" };
+                right_count += 1;
+            }
+            right_count = addButtonLines(&right_lines, right_count, max_right_lines, buttons, .gamepad);
+        }
+
+        // Keyboard section
+        if (kb_count > 0) {
+            if (right_count < max_right_lines) {
+                right_lines[right_count] = .{ .kind = .header, .text = "Keyboard" };
+                right_count += 1;
+            }
+            right_count = addButtonLines(&right_lines, right_count, max_right_lines, buttons, .keyboard);
+        }
+
+        // Mouse section
+        if (ms_count > 0) {
+            if (right_count < max_right_lines) {
+                right_lines[right_count] = .{ .kind = .header, .text = "Mouse" };
+                right_count += 1;
+            }
+            right_count = addButtonLines(&right_lines, right_count, max_right_lines, buttons, .mouse);
+        }
+    }
+
+    // Header
+    if (config.output_info) |info| {
+        const prefix = "┌─ Output: ";
+        const max_name = W - 4 - 11;
+        const name_len = @min(info.name.len, max_name);
+        try writer.writeAll(BOLD ++ CYAN ++ prefix);
+        try writer.writeAll(info.name[0..name_len]);
+        try writer.writeAll(" ");
+        const used = 11 + name_len + 1;
+        var hi: usize = used;
+        while (hi < W - 1) : (hi += 1) try writer.writeAll("─");
+        try writer.writeAll("┐\r\n" ++ RESET);
+    } else {
+        try writer.writeAll(BOLD ++ CYAN ++
+            "┌─ Sticks ──────────┬─ Triggers ───┬─ Mapped Outputs ────────────────┐\r\n" ++
+            RESET);
+    }
+
+    // 7 main rows: LX, LY, RX, RY+dpad_header, dpad_up, dpad_lr, dpad_down
+    // Each row has left+mid content, then right column from right_lines
+
+    // Row 0: LX / LT bar
+    try renderLeftMid(writer, gs, 0);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 0);
+
+    // Row 1: LY / RT bar
+    try renderLeftMid(writer, gs, 1);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 1);
+
+    // Row 2: RX / LT:RT values
+    try renderLeftMid(writer, gs, 2);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 2);
+
+    // Row 3: RY / dpad header
+    try renderLeftMid(writer, gs, 3);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 3);
+
+    // Row 4: dpad up
+    try renderLeftMid(writer, gs, 4);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 4);
+
+    // Row 5: dpad left · right
+    try renderLeftMid(writer, gs, 5);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 5);
+
+    // Row 6: dpad down
+    try renderLeftMid(writer, gs, 6);
+    try renderRightCol(writer, gs, config, right_lines[0..right_count], 6);
+
+    // Extra rows if right_count > 7
+    var extra_row: usize = 7;
+    while (extra_row < right_count) : (extra_row += 1) {
+        // Empty left + mid
+        try writer.writeAll("│");
+        try pad(writer, 1, CL);
+        try writer.writeAll("│");
+        try pad(writer, CL + 1, CR_START);
+        try renderRightCol(writer, gs, config, right_lines[0..right_count], extra_row);
+    }
+
+    try renderTail(writer, gs, raw, rumble_on, config, .mapped);
+}
+
+const RightLine = struct {
+    kind: enum { header, buttons },
+    text: []const u8 = "",
+    // For buttons kind: indices into mapped_buttons
+    start: usize = 0,
+    end: usize = 0,
+};
+
+fn addButtonLines(
+    lines: []RightLine,
+    count: usize,
+    max: usize,
+    buttons: []const MappedButton,
+    cat: OutputCategory,
+) usize {
+    var c = count;
+
+    // Collect indices of buttons in this category
+    var indices: [64]usize = undefined;
+    var n_indices: usize = 0;
+    for (buttons, 0..) |mb, i| {
+        if (mb.category == cat) {
+            if (n_indices < indices.len) {
+                indices[n_indices] = i;
+                n_indices += 1;
+            }
+        }
+    }
+
+    var row_width: usize = 1; // leading space
+    var btn_idx: usize = 0;
+    var first_in_row: usize = 0;
+    var items_in_row: usize = 0;
+
+    while (btn_idx < n_indices) : (btn_idx += 1) {
+        const mb = buttons[indices[btn_idx]];
+        const needed = mb.label_len + 2 + 1; // [label] + space
+        if (items_in_row > 0 and row_width + needed > RIGHT_INNER) {
+            // Emit current row
+            if (c < max) {
+                lines[c] = .{ .kind = .buttons, .start = first_in_row, .end = btn_idx };
+                c += 1;
+            }
+            first_in_row = btn_idx;
+            row_width = 1;
+            items_in_row = 0;
+        }
+        row_width += needed;
+        items_in_row += 1;
+    }
+    // Emit last row
+    if (items_in_row > 0 and c < max) {
+        lines[c] = .{ .kind = .buttons, .start = first_in_row, .end = n_indices };
+        c += 1;
+    }
+
+    return c;
+}
+
+fn renderLeftMid(writer: anytype, gs: *const GamepadState, row: usize) !void {
+    switch (row) {
+        0 => {
+            try writer.writeAll("│ LX:");
+            try writer.print("{:>6}", .{gs.ax});
+            try pad(writer, 11, CL);
+            try writer.writeAll("│ LT ");
+            try bar(writer, gs.lt, 9);
+            try pad(writer, CL + 14, CL + CM);
+        },
+        1 => {
+            try writer.writeAll("│ LY:");
+            try writer.print("{:>6}", .{gs.ay});
+            try pad(writer, 11, CL);
+            try writer.writeAll("│ RT ");
+            try bar(writer, gs.rt, 9);
+            try pad(writer, CL + 14, CL + CM);
+        },
+        2 => {
+            try writer.writeAll("│ RX:");
+            try writer.print("{:>6}", .{gs.rx});
+            try pad(writer, 11, CL);
+            try writer.writeAll("│LT:");
+            try writer.print("{:>3}", .{gs.lt});
+            try writer.writeAll(" RT:");
+            try writer.print("{:>3}", .{gs.rt});
+            try pad(writer, CL + 14, CL + CM);
+        },
+        3 => {
+            try writer.writeAll("│ RY:");
+            try writer.print("{:>6}", .{gs.ry});
+            try pad(writer, 11, CL);
+            try writer.writeAll("├─ DPad ───────");
+        },
+        4 => {
+            try writer.writeAll("│");
+            try pad(writer, 1, CL);
+            try writer.writeAll("│      ");
+            const up_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadUp)))) != 0;
+            if (up_p) try writer.writeAll(GREEN ++ "↑" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
+            try pad(writer, CL + 8, CR_START);
+        },
+        5 => {
+            try writer.writeAll("│");
+            try pad(writer, 1, CL);
+            try writer.writeAll("│    ");
+            const left_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadLeft)))) != 0;
+            const right_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadRight)))) != 0;
+            if (left_p) try writer.writeAll(GREEN ++ "←" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
+            try writer.writeAll(" · ");
+            if (right_p) try writer.writeAll(GREEN ++ "→" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
+            try pad(writer, CL + 10, CR_START);
+        },
+        6 => {
+            try writer.writeAll("│");
+            try pad(writer, 1, CL);
+            try writer.writeAll("│      ");
+            const down_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadDown)))) != 0;
+            if (down_p) try writer.writeAll(GREEN ++ "↓" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
+            try pad(writer, CL + 8, CR_START);
+        },
+        else => {
+            try writer.writeAll("│");
+            try pad(writer, 1, CL);
+            try writer.writeAll("│");
+            try pad(writer, CL + 1, CR_START);
+        },
+    }
+}
+
+fn renderRightCol(
+    writer: anytype,
+    gs: *const GamepadState,
+    config: RenderConfig,
+    right_lines: []const RightLine,
+    row: usize,
+) !void {
+    // Row 3 special: dpad header uses ┤ instead of │
+    if (row == 3) {
+        try writer.writeAll("┤ ");
+    } else {
+        try writer.writeAll("│ ");
+    }
+
+    if (row < right_lines.len) {
+        const line = right_lines[row];
+        switch (line.kind) {
+            .header => {
+                try writer.writeAll(BOLD ++ CYAN);
+                try writer.writeAll(line.text);
+                try writer.writeAll(RESET);
+                try closeRow(writer, CR_START + 2 + line.text.len);
+            },
+            .buttons => {
+                const buttons = config.mapped_buttons orelse {
+                    try closeRow(writer, CR_START + 2);
+                    return;
+                };
+                // Find the right category by looking at what category the line's buttons belong to
+                // We need to collect indices for the category, then use start..end
+                const line_cat = buttons[findCatIndex(buttons, line, 0)].category;
+                var indices: [64]usize = undefined;
+                var n: usize = 0;
+                for (buttons, 0..) |mb, i| {
+                    if (mb.category == line_cat) {
+                        if (n < indices.len) {
+                            indices[n] = i;
+                            n += 1;
+                        }
+                    }
+                }
+
+                var col: usize = CR_START + 2;
+                const end = @min(line.end, n);
+                for (indices[line.start..end]) |idx| {
+                    const mb = buttons[idx];
+                    col += try btnLabel(writer, gs, mb.btn_id, mb.getLabel());
+                    try writer.writeAll(" ");
+                    col += 1;
+                }
+                try closeRow(writer, col);
+            },
+        }
+    } else {
+        try closeRow(writer, CR_START + 2);
+    }
+}
+
+fn findCatIndex(buttons: []const MappedButton, line: RightLine, _: usize) usize {
+    // Walk through buttons finding the category that this line's start index refers to
+    // The start/end in the line are indices into the per-category list
+    // We need to find which category's list this is. Look backwards through prior header lines.
+    // Simpler: just find any button that would be at position 'start' in its category group.
+    var cat_counts = [_]usize{0} ** 3; // gamepad, keyboard, mouse
+    for (buttons, 0..) |mb, i| {
+        const cat_idx: usize = @intFromEnum(mb.category);
+        if (cat_counts[cat_idx] == line.start) return i;
+        cat_counts[cat_idx] += 1;
+    }
+    return 0;
+}
+
+fn renderTail(
+    writer: anytype,
+    gs: *const GamepadState,
+    raw: []const u8,
+    rumble_on: bool,
+    config: RenderConfig,
+    view_mode: ViewMode,
+) !void {
     // Gyro (conditional)
     if (config.has_gyro) {
         try sectionHeader(writer, "Gyro");
-        // │ GX  + 32-bar + "  " + 6-digit + "  AX:" + 6-digit = 5+32+2+6+5+6 = 56
         inline for (.{
             .{ "GX", "AX", &gs.gyro_x, &gs.accel_x },
             .{ "GY", "AY", &gs.gyro_y, &gs.accel_y },
@@ -399,7 +765,6 @@ pub fn renderFrame(
     // Touchpad (conditional)
     if (config.has_touchpad) {
         try sectionHeader(writer, "Touchpad");
-        // │ T0 ON   X:  xxxx  Y:  xxxx = 5+3+2+2+6+4+6 = 28
         inline for (.{
             .{ "T0", &gs.touch0_active, &gs.touch0_x, &gs.touch0_y },
             .{ "T1", &gs.touch1_active, &gs.touch1_x, &gs.touch1_y },
@@ -444,12 +809,11 @@ pub fn renderFrame(
         .raw => try writer.writeAll(" [M]ode: RAW "),
         .mapped => try writer.writeAll(YELLOW ++ " [M]ode: MAPPED " ++ RESET),
     }
-    var fi: usize = 37; // └(1) + rumble(22) + mode(14) = 37 visible
-    // Show mapping file in mapped mode
+    var fi: usize = 37;
     if (view_mode == .mapped) {
         if (config.output_info) |info| {
             if (info.mapping_file.len > 0) {
-                const max_len = W - 2 - fi; // leave room for ┘
+                const max_len = W - 2 - fi;
                 if (max_len > 4) {
                     const show_len = @min(info.mapping_file.len, max_len - 1);
                     try writer.writeAll(DIM);
@@ -611,4 +975,49 @@ test "renderFrame: extended buttons shown when configured" {
     const out = fbs.getWritten();
     try testing.expect(std.mem.indexOf(u8, out, "[C]") != null);
     try testing.expect(std.mem.indexOf(u8, out, "[Z]") != null);
+}
+
+test "renderFrame: mapped mode shows grouped outputs" {
+    var buf: [8192]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const gs = makeTestState();
+    const raw = [_]u8{ 0x01, 0x02 };
+
+    var mb1 = MappedButton{ .btn_id = .A, .category = .gamepad, .label_len = 1 };
+    mb1.short_label[0] = 'S';
+    var mb2 = MappedButton{ .btn_id = .M1, .category = .keyboard, .label_len = 3 };
+    @memcpy(mb2.short_label[0..3], "F13");
+    const mapped = [_]MappedButton{ mb1, mb2 };
+
+    var cfg = RenderConfig{
+        .output_info = .{ .name = "Test Pad" },
+        .mapped_buttons = &mapped,
+    };
+    _ = &cfg;
+
+    try renderFrame(fbs.writer(), &gs, &raw, false, cfg, .mapped);
+    const out = fbs.getWritten();
+    try testing.expect(std.mem.indexOf(u8, out, "Gamepad") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Keyboard") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[S]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[F13]") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Test Pad") != null);
+}
+
+test "shortenEventCode: known codes" {
+    try testing.expectEqualStrings("S", shortenEventCode("BTN_SOUTH"));
+    try testing.expectEqualStrings("HM", shortenEventCode("BTN_MODE"));
+    try testing.expectEqualStrings("H1", shortenEventCode("BTN_TRIGGER_HAPPY1"));
+    try testing.expectEqualStrings("F13", shortenEventCode("KEY_F13"));
+    try testing.expectEqualStrings("SPC", shortenEventCode("KEY_SPACE"));
+    try testing.expectEqualStrings("ML", shortenEventCode("BTN_LEFT"));
+    try testing.expectEqualStrings("MM", shortenEventCode("BTN_MIDDLE"));
+}
+
+test "categorizeEventCode: categories" {
+    try testing.expectEqual(OutputCategory.gamepad, categorizeEventCode("BTN_SOUTH"));
+    try testing.expectEqual(OutputCategory.keyboard, categorizeEventCode("KEY_F13"));
+    try testing.expectEqual(OutputCategory.mouse, categorizeEventCode("BTN_LEFT"));
+    try testing.expectEqual(OutputCategory.mouse, categorizeEventCode("mouse_left"));
+    try testing.expectEqual(OutputCategory.gamepad, categorizeEventCode("BTN_TRIGGER_HAPPY1"));
 }
