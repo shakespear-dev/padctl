@@ -8,8 +8,9 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\
         \\[Service]
         \\Type=simple
-        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/ --pid-file /run/padctl.pid
-        \\PIDFile=/run/padctl.pid
+        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/ --pid-file /run/padctl/padctl.pid
+        \\PIDFile=/run/padctl/padctl.pid
+        \\RuntimeDirectory=padctl
         \\Restart=on-failure
         \\RestartSec=3
         \\ProtectSystem=strict
@@ -215,7 +216,7 @@ pub fn uninstall(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     _ = std.posix.write(std.posix.STDOUT_FILENO, "/\n") catch {};
 
     // Remove runtime files
-    std.fs.deleteFileAbsolute("/run/padctl.pid") catch {};
+    std.fs.deleteFileAbsolute("/run/padctl/padctl.pid") catch {};
     std.fs.deleteFileAbsolute("/run/padctl/padctl.sock") catch {};
 
     if (destdir.len == 0) {

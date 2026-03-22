@@ -44,7 +44,7 @@ fn chooseFromList(
     }
     while (true) {
         print(allocator, pbuf, "Choice [1-{d}]: ", .{items.len});
-        const raw = readLine(input_buf) catch return 0;
+        const raw = try readLine(input_buf);
         const n = std.fmt.parseInt(usize, raw, 10) catch continue;
         if (n >= 1 and n <= items.len) return n - 1;
     }
@@ -98,12 +98,14 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
     if (device_arg) |d| {
         device_name = d;
     } else {
-        const scan_dir = blk: {
+        var scan_dir_owned = false;
+        const scan_dir: []const u8 = blk: {
             const dev_dirs = paths.resolveDeviceConfigDirs(allocator) catch break :blk "/usr/share/padctl/devices";
             defer paths.freeConfigDirs(allocator, dev_dirs);
-            break :blk try allocator.dupe(u8, dev_dirs[2]);
+            scan_dir_owned = true;
+            break :blk allocator.dupe(u8, dev_dirs[2]) catch break :blk "/usr/share/padctl/devices";
         };
-        defer allocator.free(scan_dir);
+        defer if (scan_dir_owned) allocator.free(@constCast(scan_dir));
 
         const entries: []scan_mod.ScanEntry = scan_mod.scan(allocator, scan_dir) catch blk2: {
             break :blk2 try allocator.alloc(scan_mod.ScanEntry, 0);

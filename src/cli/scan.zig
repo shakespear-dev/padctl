@@ -208,7 +208,10 @@ pub fn run(allocator: std.mem.Allocator, config_dirs: []const []const u8, writer
                     break;
                 }
             }
-            if (!found) try all_entries.append(allocator, e);
+            if (!found) all_entries.append(allocator, e) catch |err| {
+                freeEntry(allocator, e);
+                return err;
+            };
         }
     }
 
