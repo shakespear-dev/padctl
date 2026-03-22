@@ -67,14 +67,14 @@ pub const LayerState = struct {
     pub fn processLayerTriggers(
         self: *LayerState,
         configs: []const LayerConfig,
-        buttons: u32,
-        prev_buttons: u32,
+        buttons: u64,
+        prev_buttons: u64,
     ) LayerAction {
         var action = LayerAction{};
 
         for (configs) |*cfg| {
             const trigger_id = std.meta.stringToEnum(@import("state.zig").ButtonId, cfg.trigger) orelse continue;
-            const mask = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(trigger_id)));
+            const mask = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(trigger_id)));
             const pressed = (buttons & mask) != 0;
             const was_pressed = (prev_buttons & mask) != 0;
 
@@ -364,14 +364,14 @@ const hold_aim = LayerConfig{ .name = "aim", .trigger = "LT", .activation = "hol
 const hold_fn = LayerConfig{ .name = "fn", .trigger = "RB", .activation = "hold" };
 const toggle_sel = LayerConfig{ .name = "sel", .trigger = "Select", .activation = "toggle" };
 
-fn ltMask() u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.LT)));
+fn ltMask() u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.LT)));
 }
-fn rbMask() u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.RB)));
+fn rbMask() u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.RB)));
 }
-fn selMask() u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.Select)));
+fn selMask() u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.Select)));
 }
 
 test "processLayerTriggers: Hold press → PENDING, arm timer" {
@@ -528,7 +528,7 @@ test "processLayerTriggers: multiple Toggles on — declaration order wins (ADR-
     const tog_a = LayerConfig{ .name = "a", .trigger = "LB", .activation = "toggle" };
     const tog_b = LayerConfig{ .name = "b", .trigger = "RB", .activation = "toggle" };
     const configs = [_]LayerConfig{ tog_a, tog_b };
-    const lb = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(@import("state.zig").ButtonId.LB)));
+    const lb = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(@import("state.zig").ButtonId.LB)));
     const rb = rbMask();
 
     // Toggle "a" on

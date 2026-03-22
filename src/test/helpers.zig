@@ -20,8 +20,8 @@ pub const KEY_F13: u16 = 183;
 pub const KEY_B: u16 = 48;
 pub const KEY_LEFTSHIFT: u16 = 42;
 
-pub fn btnMask(id: ButtonId) u32 {
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(id)));
+pub fn btnMask(id: ButtonId) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
 }
 
 pub const MapperContext = struct {

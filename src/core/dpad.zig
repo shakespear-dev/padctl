@@ -33,7 +33,7 @@ pub fn processDpad(
     prev_dpad_y: i8,
     cfg: *const DpadConfig,
     aux: *AuxEventList,
-    suppressed_buttons: *u32,
+    suppressed_buttons: *u64,
     suppress_dpad_hat: *bool,
 ) void {
     if (!std.mem.eql(u8, cfg.mode, "arrows")) return;
@@ -54,12 +54,12 @@ pub fn processDpad(
 
     if (cfg.suppress_gamepad orelse false) {
         // Suppress DPad buttons (buttons-type dpad)
-        const up_idx: u5 = @intCast(@intFromEnum(ButtonId.DPadUp));
-        const down_idx: u5 = @intCast(@intFromEnum(ButtonId.DPadDown));
-        const left_idx: u5 = @intCast(@intFromEnum(ButtonId.DPadLeft));
-        const right_idx: u5 = @intCast(@intFromEnum(ButtonId.DPadRight));
-        suppressed_buttons.* |= (@as(u32, 1) << up_idx) | (@as(u32, 1) << down_idx) |
-            (@as(u32, 1) << left_idx) | (@as(u32, 1) << right_idx);
+        const up_idx: u6 = @intCast(@intFromEnum(ButtonId.DPadUp));
+        const down_idx: u6 = @intCast(@intFromEnum(ButtonId.DPadDown));
+        const left_idx: u6 = @intCast(@intFromEnum(ButtonId.DPadLeft));
+        const right_idx: u6 = @intCast(@intFromEnum(ButtonId.DPadRight));
+        suppressed_buttons.* |= (@as(u64, 1) << up_idx) | (@as(u64, 1) << down_idx) |
+            (@as(u64, 1) << left_idx) | (@as(u64, 1) << right_idx);
         // Suppress hat-type dpad axes (caller zeroes dpad_x/y in emit_state)
         suppress_dpad_hat.* = true;
     }
@@ -76,18 +76,18 @@ fn makeCfg(mode: []const u8, suppress_gamepad: ?bool) DpadConfig {
 test "gamepad mode: no aux events emitted" {
     const cfg = makeCfg("gamepad", null);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     processDpad(0, -1, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
     try testing.expectEqual(@as(usize, 0), aux.len);
-    try testing.expectEqual(@as(u32, 0), suppressed);
+    try testing.expectEqual(@as(u64, 0), suppressed);
     try testing.expect(!suppress_hat);
 }
 
 test "arrows mode: dpad_y < 0 -> KEY_UP press" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     processDpad(0, -1, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
     try testing.expectEqual(@as(usize, 1), aux.len);
@@ -99,7 +99,7 @@ test "arrows mode: dpad_y < 0 -> KEY_UP press" {
 test "arrows mode: dpad from up to none -> KEY_UP release" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     processDpad(0, 0, 0, -1, &cfg, &aux, &suppressed, &suppress_hat);
     try testing.expectEqual(@as(usize, 1), aux.len);
@@ -111,7 +111,7 @@ test "arrows mode: dpad from up to none -> KEY_UP release" {
 test "arrows mode: diagonal up+right -> two key presses" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     processDpad(1, -1, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
     try testing.expectEqual(@as(usize, 2), aux.len);
@@ -129,10 +129,10 @@ test "arrows mode: diagonal up+right -> two key presses" {
 test "suppress_gamepad: DPad button bits suppressed" {
     const cfg = makeCfg("arrows", true);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     processDpad(0, -1, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
-    const up_bit: u32 = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.DPadUp)));
+    const up_bit: u64 = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadUp)));
     try testing.expect((suppressed & up_bit) != 0);
     try testing.expect(suppress_hat);
 }
@@ -140,17 +140,17 @@ test "suppress_gamepad: DPad button bits suppressed" {
 test "suppress_gamepad=false: no button suppression" {
     const cfg = makeCfg("arrows", false);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     processDpad(0, -1, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
-    try testing.expectEqual(@as(u32, 0), suppressed);
+    try testing.expectEqual(@as(u64, 0), suppressed);
     try testing.expect(!suppress_hat);
 }
 
 test "edge detection: same state produces no events" {
     const cfg = makeCfg("arrows", null);
     var aux = AuxEventList{};
-    var suppressed: u32 = 0;
+    var suppressed: u64 = 0;
     var suppress_hat: bool = false;
     // Already in up state, still in up state — no change
     processDpad(0, -1, 0, -1, &cfg, &aux, &suppressed, &suppress_hat);
@@ -163,7 +163,7 @@ test "arrows mode: all four directions" {
     // down
     {
         var aux = AuxEventList{};
-        var suppressed: u32 = 0;
+        var suppressed: u64 = 0;
         var suppress_hat: bool = false;
         processDpad(0, 1, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
         try testing.expectEqual(@as(usize, 1), aux.len);
@@ -173,7 +173,7 @@ test "arrows mode: all four directions" {
     // left
     {
         var aux = AuxEventList{};
-        var suppressed: u32 = 0;
+        var suppressed: u64 = 0;
         var suppress_hat: bool = false;
         processDpad(-1, 0, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
         try testing.expectEqual(@as(usize, 1), aux.len);
@@ -183,7 +183,7 @@ test "arrows mode: all four directions" {
     // right
     {
         var aux = AuxEventList{};
-        var suppressed: u32 = 0;
+        var suppressed: u64 = 0;
         var suppress_hat: bool = false;
         processDpad(1, 0, 0, 0, &cfg, &aux, &suppressed, &suppress_hat);
         try testing.expectEqual(@as(usize, 1), aux.len);

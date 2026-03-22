@@ -40,9 +40,9 @@ pub const Mapper = struct {
     gyro_proc: gyro.GyroProcessor,
     stick_left: stick.StickProcessor,
     stick_right: stick.StickProcessor,
-    suppressed_buttons: u32,
-    injected_buttons: u32,
-    pending_tap_release: ?u32,
+    suppressed_buttons: u64,
+    injected_buttons: u64,
+    pending_tap_release: ?u64,
     timer_fd: std.posix.fd_t,
     allocator: std.mem.Allocator,
     active_macros: std.ArrayList(MacroPlayer),
@@ -193,7 +193,7 @@ pub const Mapper = struct {
         // [6] build aux + injected_buttons from per_src_inject
         for (0..BUTTON_COUNT) |i| {
             const target = per_src_inject[i] orelse continue;
-            const src_mask: u32 = @as(u32, 1) << @as(u5, @intCast(i));
+            const src_mask: u64 = @as(u64, 1) << @as(u6, @intCast(i));
             const pressed = (self.state.buttons & src_mask) != 0;
             const prev_pressed = (self.prev.buttons & src_mask) != 0;
             switch (target) {
@@ -201,8 +201,8 @@ pub const Mapper = struct {
                 .mouse_button => |code| aux.append(.{ .mouse_button = .{ .code = code, .pressed = pressed } }) catch {},
                 .gamepad_button => |dst| {
                     if (pressed) {
-                        const dst_idx: u5 = @intCast(@intFromEnum(dst));
-                        self.injected_buttons |= @as(u32, 1) << dst_idx;
+                        const dst_idx: u6 = @intCast(@intFromEnum(dst));
+                        self.injected_buttons |= @as(u64, 1) << dst_idx;
                     }
                 },
                 .disabled => {},
@@ -373,14 +373,14 @@ fn resolveStickConfig(mc: *const mapping.StickConfig) stick.StickConfig {
 
 fn collectRemapMap(
     remap_map: toml.HashMap([]const u8),
-    suppressed: *u32,
+    suppressed: *u64,
     per_src_inject: []?RemapTargetResolved,
 ) void {
     var it = remap_map.map.iterator();
     while (it.next()) |entry| {
         const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse continue;
-        const src_idx: u5 = @intCast(@intFromEnum(src_id));
-        suppressed.* |= @as(u32, 1) << src_idx;
+        const src_idx: u6 = @intCast(@intFromEnum(src_id));
+        suppressed.* |= @as(u64, 1) << src_idx;
         const target = resolveTarget(entry.value_ptr.*) catch continue;
         per_src_inject[@intCast(src_idx)] = target;
     }
@@ -389,8 +389,8 @@ fn collectRemapMap(
 fn emitTapEvent(
     target: RemapTargetResolved,
     aux: *AuxEventList,
-    injected_buttons: *u32,
-    pending_tap_release: *?u32,
+    injected_buttons: *u64,
+    pending_tap_release: *?u64,
 ) void {
     switch (target) {
         .key => |code| {
@@ -402,8 +402,8 @@ fn emitTapEvent(
             aux.append(.{ .mouse_button = .{ .code = code, .pressed = false } }) catch {};
         },
         .gamepad_button => |dst| {
-            const dst_idx: u5 = @intCast(@intFromEnum(dst));
-            const mask: u32 = @as(u32, 1) << dst_idx;
+            const dst_idx: u6 = @intCast(@intFromEnum(dst));
+            const mask: u64 = @as(u64, 1) << dst_idx;
             injected_buttons.* |= mask;
             pending_tap_release.* = mask;
         },
@@ -411,12 +411,12 @@ fn emitTapEvent(
     }
 }
 
-fn buttonBit(name: []const u8) u32 {
+fn buttonBit(name: []const u8) u64 {
     const id = std.meta.stringToEnum(ButtonId, name) orelse return 0;
-    return @as(u32, 1) << @as(u5, @intCast(@intFromEnum(id)));
+    return @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
 }
 
-fn checkGyroActivate(activate: ?[]const u8, buttons: u32) bool {
+fn checkGyroActivate(activate: ?[]const u8, buttons: u64) bool {
     const spec = activate orelse return true;
     if (std.mem.startsWith(u8, spec, "hold_")) {
         const btn_name = spec["hold_".len..];
@@ -446,9 +446,9 @@ test "no layer no remap: apply passes through unchanged" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
-    try testing.expect((events.gamepad.buttons & (@as(u32, 1) << a_idx)) != 0);
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << a_idx)) != 0);
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
 
@@ -463,9 +463,9 @@ test "base remap disabled: source button suppressed" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
 
@@ -480,10 +480,10 @@ test "base remap key: source -> KEY_F13 aux event" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const m1_idx: u5 = @intCast(@intFromEnum(ButtonId.M1));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << m1_idx }, 16);
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << m1_idx }, 16);
 
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << m1_idx));
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << m1_idx));
     try testing.expectEqual(@as(usize, 1), events.aux.len);
     switch (events.aux.get(0)) {
         .key => |k| {
@@ -505,12 +505,12 @@ test "base remap gamepad_button: A -> B" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
 
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
-    try testing.expect((events.gamepad.buttons & (@as(u32, 1) << b_idx)) != 0);
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << b_idx)) != 0);
     try testing.expectEqual(@as(usize, 0), events.aux.len);
 }
 
@@ -538,18 +538,18 @@ test "layer remap overrides base: base A->B, layer A->C" {
     _ = m.layer.onTriggerPress(configs[0].name, 200);
     _ = m.layer.onTimerExpired();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const x_idx: u5 = @intCast(@intFromEnum(ButtonId.X));
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
 
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
 
     // A suppressed
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
     // B not injected (overridden by layer)
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << b_idx));
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << b_idx));
     // X injected (layer remap wins)
-    try testing.expect((events.gamepad.buttons & (@as(u32, 1) << x_idx)) != 0);
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << x_idx)) != 0);
 }
 
 test "suppress accumulates: base suppress A + layer suppress B" {
@@ -575,13 +575,13 @@ test "suppress accumulates: base suppress A + layer suppress B" {
     _ = m.layer.onTriggerPress(configs[0].name, 200);
     _ = m.layer.onTimerExpired();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const both = (@as(u32, 1) << a_idx) | (@as(u32, 1) << b_idx);
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const both = (@as(u64, 1) << a_idx) | (@as(u64, 1) << b_idx);
     const events = try m.apply(.{ .buttons = both }, 16);
 
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << a_idx));
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << b_idx));
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << a_idx));
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << b_idx));
 }
 
 test "inject last-write wins: layer inject overrides base inject for same button" {
@@ -608,14 +608,14 @@ test "inject last-write wins: layer inject overrides base inject for same button
     _ = m.layer.onTriggerPress(configs[0].name, 200);
     _ = m.layer.onTimerExpired();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const x_idx: u5 = @intCast(@intFromEnum(ButtonId.X));
-    const y_idx: u5 = @intCast(@intFromEnum(ButtonId.Y));
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const x_idx: u6 = @intCast(@intFromEnum(ButtonId.X));
+    const y_idx: u6 = @intCast(@intFromEnum(ButtonId.Y));
 
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
 
-    try testing.expectEqual(@as(u32, 0), events.gamepad.buttons & (@as(u32, 1) << x_idx));
-    try testing.expect((events.gamepad.buttons & (@as(u32, 1) << y_idx)) != 0);
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << x_idx));
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << y_idx)) != 0);
 }
 
 test "prev frame masking: suppress produces correct diff" {
@@ -629,19 +629,19 @@ test "prev frame masking: suppress produces correct diff" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const a_mask: u32 = @as(u32, 1) << a_idx;
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
 
     // Frame N-1: A pressed, remap disabled
     const ev1 = try m.apply(.{ .buttons = a_mask }, 16);
     // A is suppressed in output, prev is now raw a_mask
-    try testing.expectEqual(@as(u32, 0), ev1.gamepad.buttons & a_mask);
+    try testing.expectEqual(@as(u64, 0), ev1.gamepad.buttons & a_mask);
 
     // Frame N: A still pressed — should produce no change (both masked_prev and gamepad have A=0)
     const ev2 = try m.apply(.{ .buttons = a_mask }, 16);
-    try testing.expectEqual(@as(u32, 0), ev2.gamepad.buttons & a_mask);
+    try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & a_mask);
     // masked_prev should also have A=0 (same suppress applied)
-    try testing.expectEqual(@as(u32, 0), ev2.prev.buttons & a_mask);
+    try testing.expectEqual(@as(u64, 0), ev2.prev.buttons & a_mask);
 }
 
 test "onTimerExpired: PENDING -> ACTIVE activates layer" {
@@ -671,10 +671,10 @@ test "onTimerExpired: PENDING -> ACTIVE activates layer" {
     try testing.expect(m.layer.tap_hold.?.layer_activated);
 
     // Now layer remap should be active
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const b_idx: u5 = @intCast(@intFromEnum(ButtonId.B));
-    const events = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
-    try testing.expect((events.gamepad.buttons & (@as(u32, 1) << b_idx)) != 0);
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const b_idx: u6 = @intCast(@intFromEnum(ButtonId.B));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << b_idx)) != 0);
 }
 
 test "layer gyro override: active layer gyro config used" {
@@ -750,10 +750,10 @@ test "gamepad_button tap: injected this frame, released next frame" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const lt_idx: u5 = @intCast(@intFromEnum(ButtonId.LT));
-    const lt_mask: u32 = @as(u32, 1) << lt_idx;
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
-    const a_mask: u32 = @as(u32, 1) << a_idx;
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_mask: u64 = @as(u64, 1) << a_idx;
 
     // Press LT -> PENDING
     _ = try m.apply(.{ .buttons = lt_mask }, 16);
@@ -765,7 +765,7 @@ test "gamepad_button tap: injected this frame, released next frame" {
 
     // Next frame: pending_tap_release should clear A
     const ev_release = try m.apply(.{}, 16);
-    try testing.expectEqual(@as(u32, 0), ev_release.gamepad.buttons & a_mask);
+    try testing.expectEqual(@as(u64, 0), ev_release.gamepad.buttons & a_mask);
     try testing.expect(m.pending_tap_release == null);
 }
 
@@ -843,8 +843,8 @@ test "checkGyroActivate: always always true" {
 }
 
 test "checkGyroActivate: hold_RB pressed" {
-    const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
-    const rb_mask: u32 = @as(u32, 1) << rb_idx;
+    const rb_idx: u6 = @intCast(@intFromEnum(ButtonId.RB));
+    const rb_mask: u64 = @as(u64, 1) << rb_idx;
     try testing.expect(checkGyroActivate("hold_RB", rb_mask));
 }
 
@@ -871,8 +871,8 @@ test "T1: Mapper.apply toggle OOM is silently swallowed" {
     var fa = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, fa.allocator());
     defer m.deinit();
-    const sel_idx: u5 = @intCast(@intFromEnum(ButtonId.Select));
-    const sel_mask: u32 = @as(u32, 1) << sel_idx;
+    const sel_idx: u6 = @intCast(@intFromEnum(ButtonId.Select));
+    const sel_mask: u64 = @as(u64, 1) << sel_idx;
     // Rising edge then release — toggle fires, toggled.put OOMs silently.
     _ = try m.apply(.{ .buttons = sel_mask }, 16);
     _ = try m.apply(.{}, 16);
@@ -902,9 +902,9 @@ test "T1: active_macros append OOM is silently ignored" {
     var fa = testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
     var m = try Mapper.init(&parsed.value, std.posix.STDIN_FILENO, fa.allocator());
     defer m.deinit();
-    const a_idx: u5 = @intCast(@intFromEnum(ButtonId.A));
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
     // Rising edge triggers macro dispatch; append failure must not crash.
-    _ = try m.apply(.{ .buttons = @as(u32, 1) << a_idx }, 16);
+    _ = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
 }
 
 // T5: AuxEventList overflow
@@ -938,8 +938,8 @@ test "gyro activate: inactive frame no REL events and processor reset" {
     defer m.deinit();
 
     // Seed EMA with large gyro input while RB is held
-    const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
-    const rb_mask: u32 = @as(u32, 1) << rb_idx;
+    const rb_idx: u6 = @intCast(@intFromEnum(ButtonId.RB));
+    const rb_mask: u64 = @as(u64, 1) << rb_idx;
     _ = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
 
     // Release RB — gyro should be deactivated, processor reset, no REL events
@@ -964,8 +964,8 @@ test "gyro activate: active when RB held, inactive when released" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const rb_idx: u5 = @intCast(@intFromEnum(ButtonId.RB));
-    const rb_mask: u32 = @as(u32, 1) << rb_idx;
+    const rb_idx: u6 = @intCast(@intFromEnum(ButtonId.RB));
+    const rb_mask: u64 = @as(u64, 1) << rb_idx;
 
     // RB held, large gyro — should produce REL events
     const ev_active = try m.apply(.{ .buttons = rb_mask, .gyro_x = 10000, .gyro_y = 10000 }, 16);
@@ -1069,8 +1069,8 @@ test "T7: layer switch resets gyro EMA and accumulators" {
     m.gyro_proc.accum_y = -0.4;
 
     // Trigger layer activation: LT press → PENDING
-    const lt_idx: u5 = @intCast(@intFromEnum(ButtonId.LT));
-    const lt_mask: u32 = @as(u32, 1) << lt_idx;
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
     _ = try m.apply(.{ .buttons = lt_mask }, 16);
 
     // Timer fires → ACTIVE (active_changed = true inside onTimerExpired, but processLayerTriggers
@@ -1124,8 +1124,8 @@ test "T7: toggle layer switch resets processors" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
-    const sel_idx: u5 = @intCast(@intFromEnum(ButtonId.Select));
-    const sel_mask: u32 = @as(u32, 1) << sel_idx;
+    const sel_idx: u6 = @intCast(@intFromEnum(ButtonId.Select));
+    const sel_mask: u64 = @as(u64, 1) << sel_idx;
 
     // Frame 1: Select pressed (rising edge only, toggle fires on release)
     _ = try m.apply(.{ .buttons = sel_mask }, 16);

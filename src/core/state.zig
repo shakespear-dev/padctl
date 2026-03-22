@@ -27,6 +27,11 @@ pub const ButtonId = enum {
     Paddle4,
     TouchPad,
     Mic,
+    C,
+    Z,
+    LM,
+    RM,
+    O,
 };
 
 pub const GamepadState = struct {
@@ -38,7 +43,7 @@ pub const GamepadState = struct {
     rt: u8 = 0,
     dpad_x: i8 = 0,
     dpad_y: i8 = 0,
-    buttons: u32 = 0,
+    buttons: u64 = 0,
     gyro_x: i16 = 0,
     gyro_y: i16 = 0,
     gyro_z: i16 = 0,
@@ -117,7 +122,7 @@ pub const GamepadStateDelta = struct {
     rt: ?u8 = null,
     dpad_x: ?i8 = null,
     dpad_y: ?i8 = null,
-    buttons: ?u32 = null,
+    buttons: ?u64 = null,
     gyro_x: ?i16 = null,
     gyro_y: ?i16 = null,
     gyro_z: ?i16 = null,
@@ -158,7 +163,7 @@ test "applyDelta: null fields leave state unchanged" {
     s.applyDelta(.{});
     try std.testing.expectEqual(@as(i16, 10), s.ax);
     try std.testing.expectEqual(@as(i16, 20), s.ay);
-    try std.testing.expectEqual(@as(u32, 0xFF), s.buttons);
+    try std.testing.expectEqual(@as(u64, 0xFF), s.buttons);
 }
 
 test "applyDelta: full overwrite" {
@@ -188,7 +193,7 @@ test "applyDelta: full overwrite" {
     try std.testing.expectEqual(@as(u8, 64), s.rt);
     try std.testing.expectEqual(@as(i8, 1), s.dpad_x);
     try std.testing.expectEqual(@as(i8, -1), s.dpad_y);
-    try std.testing.expectEqual(@as(u32, 0xDEAD), s.buttons);
+    try std.testing.expectEqual(@as(u64, 0xDEAD), s.buttons);
     try std.testing.expectEqual(@as(i16, 10), s.gyro_x);
     try std.testing.expectEqual(@as(i16, -30), s.accel_z);
 }
@@ -199,14 +204,14 @@ test "applyDelta: partial overwrite leaves other fields unchanged" {
     try std.testing.expectEqual(@as(i16, 99), s.ax);
     try std.testing.expectEqual(@as(i16, 6), s.ay); // unchanged
     try std.testing.expectEqual(@as(i16, 7), s.rx); // unchanged
-    try std.testing.expectEqual(@as(u32, 0x0F), s.buttons);
+    try std.testing.expectEqual(@as(u64, 0x0F), s.buttons);
 }
 
 test "diff: identical states produce empty delta" {
     const s = GamepadState{ .ax = 10, .buttons = 0xFF };
     const d = s.diff(s);
     try std.testing.expectEqual(@as(?i16, null), d.ax);
-    try std.testing.expectEqual(@as(?u32, null), d.buttons);
+    try std.testing.expectEqual(@as(?u64, null), d.buttons);
 }
 
 test "diff: changed fields appear in delta" {

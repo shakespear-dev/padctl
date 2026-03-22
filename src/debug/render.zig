@@ -48,8 +48,8 @@ fn signedBar(writer: anytype, value: i16, width: u8) !void {
 }
 
 fn btnLabel(writer: anytype, gs: *const GamepadState, btn: ButtonId, label: []const u8) !void {
-    const bit: u5 = @intCast(@intFromEnum(btn));
-    const pressed = gs.buttons & (@as(u32, 1) << bit) != 0;
+    const bit: u6 = @intCast(@intFromEnum(btn));
+    const pressed = gs.buttons & (@as(u64, 1) << bit) != 0;
     if (pressed) {
         try writer.print(GREEN ++ "[{s}]" ++ RESET, .{label});
     } else {
@@ -127,7 +127,7 @@ pub fn renderFrame(
 
     // Row 6: dpad up
     {
-        const up_pressed = gs.buttons & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.DPadUp)))) != 0;
+        const up_pressed = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadUp)))) != 0;
         try writer.writeAll("│                   │     ");
         if (up_pressed) try writer.writeAll(GREEN ++ "↑" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
         try writer.writeAll("       │                               │\r\n");
@@ -135,8 +135,8 @@ pub fn renderFrame(
 
     // Row 7: dpad left/right
     {
-        const left_p = gs.buttons & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.DPadLeft)))) != 0;
-        const right_p = gs.buttons & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.DPadRight)))) != 0;
+        const left_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadLeft)))) != 0;
+        const right_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadRight)))) != 0;
         try writer.writeAll("│                   │   ");
         if (left_p) try writer.writeAll(GREEN ++ "←" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
         try writer.writeAll(" · ");
@@ -146,7 +146,7 @@ pub fn renderFrame(
 
     // Row 8: dpad down
     {
-        const down_p = gs.buttons & (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.DPadDown)))) != 0;
+        const down_p = gs.buttons & (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.DPadDown)))) != 0;
         try writer.writeAll("│                   │     ");
         if (down_p) try writer.writeAll(GREEN ++ "↓" ++ RESET) else try writer.writeAll(DIM ++ "·" ++ RESET);
         try writer.writeAll("       │                               │\r\n");
@@ -221,8 +221,8 @@ fn makeTestState() GamepadState {
         .ry = 999,
         .lt = 128,
         .rt = 64,
-        .buttons = (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.A)))) |
-            (@as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.LB)))),
+        .buttons = (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.A)))) |
+            (@as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.LB)))),
         .gyro_x = 100,
         .gyro_y = -200,
         .gyro_z = 300,
@@ -309,7 +309,7 @@ test "renderFrame: pressed button highlighted differently" {
     var fbs2 = std.io.fixedBufferStream(&buf_released);
 
     var gs_pressed = GamepadState{};
-    gs_pressed.buttons = @as(u32, 1) << @as(u5, @intCast(@intFromEnum(ButtonId.A)));
+    gs_pressed.buttons = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(ButtonId.A)));
     var gs_released = GamepadState{};
     gs_released.buttons = 0;
 

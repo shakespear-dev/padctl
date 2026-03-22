@@ -58,7 +58,7 @@ test "e2e: layer hold — PENDING → ACTIVE, layer remap activates" {
 
     // Frame 2: A press while layer active → mouse_left aux event
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
 
     var found_mouse_left = false;
     for (ev.aux.slice()) |e| {
@@ -147,7 +147,7 @@ test "e2e: suppress/inject — no layer: A→KEY_F13, mouse_side unaffected" {
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     // A suppressed in gamepad
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     // KEY_F13 in aux
     try testing.expectEqual(@as(usize, 1), ev.aux.len);
     switch (ev.aux.get(0)) {
@@ -182,7 +182,7 @@ test "e2e: suppress/inject — layer ACTIVE: A→mouse_left overrides base A→K
     _ = m.layer.onTimerExpired();
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
 
     var found_mouse_left = false;
     var found_key_f13 = false;
@@ -261,7 +261,7 @@ test "e2e: dual uinput routing — gamepad_button remap stays on main device, no
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
     // A suppressed, B injected in gamepad (main device)
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expect((ev.gamepad.buttons & btnMask(.B)) != 0);
     // No aux events
     try testing.expectEqual(@as(usize, 0), ev.aux.len);
@@ -277,7 +277,7 @@ test "e2e: dual uinput routing — key remap goes to aux, not main device" {
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .buttons = btnMask(.A) }, 16);
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expectEqual(@as(usize, 1), ev.aux.len);
     switch (ev.aux.get(0)) {
         .key => |k| {
@@ -298,7 +298,7 @@ test "e2e: dual uinput routing — mouse_button remap goes to aux" {
     var m = &ctx.mapper;
 
     const ev = try m.apply(.{ .buttons = btnMask(.RB) }, 16);
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.RB));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.RB));
     try testing.expectEqual(@as(usize, 1), ev.aux.len);
     switch (ev.aux.get(0)) {
         .mouse_button => |mb| {
@@ -323,7 +323,7 @@ test "e2e: dual uinput routing — same frame: gamepad remap + key remap both ro
     const ev = try m.apply(.{ .buttons = buttons }, 16);
 
     // A→B on main device
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.A));
     try testing.expect((ev.gamepad.buttons & btnMask(.B)) != 0);
 
     // RB→KEY_F1 on aux
@@ -450,9 +450,9 @@ test "e2e: prev-frame mask — layer activates mid-stream, no spurious release f
     // Frame N: B still held + layer ACTIVE → B suppressed in both current and masked_prev
     const ev2 = try m.apply(.{ .buttons = btnMask(.B) }, 16);
     // B suppressed in emit output
-    try testing.expectEqual(@as(u32, 0), ev2.gamepad.buttons & btnMask(.B));
+    try testing.expectEqual(@as(u64, 0), ev2.gamepad.buttons & btnMask(.B));
     // B also suppressed in masked_prev (no spurious release diff)
-    try testing.expectEqual(@as(u32, 0), ev2.prev.buttons & btnMask(.B));
+    try testing.expectEqual(@as(u64, 0), ev2.prev.buttons & btnMask(.B));
 }
 
 // --- 8. Toggle layer cycle ---
@@ -491,7 +491,7 @@ test "e2e: toggle layer — Select release toggles fn layer on/off, A remap appl
         }
     }
     try testing.expect(found_f1);
-    try testing.expectEqual(@as(u32, 0), ev1.gamepad.buttons & btnMask(.A));
+    try testing.expectEqual(@as(u64, 0), ev1.gamepad.buttons & btnMask(.A));
 
     // Toggle off: Select press then release again
     _ = m.layer.processLayerTriggers(configs, sel, 0);
@@ -538,7 +538,7 @@ test "e2e: layer remap fall-through — button not in layer remap uses base rema
 
     // X pressed — not in layer remap, should fall through to base (KEY_F13)
     const ev = try m.apply(.{ .buttons = btnMask(.X) }, 16);
-    try testing.expectEqual(@as(u32, 0), ev.gamepad.buttons & btnMask(.X));
+    try testing.expectEqual(@as(u64, 0), ev.gamepad.buttons & btnMask(.X));
     var found_f13 = false;
     for (ev.aux.slice()) |e| {
         switch (e) {
