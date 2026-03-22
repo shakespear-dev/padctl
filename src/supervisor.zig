@@ -673,9 +673,6 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| m.thread.join();
     }
 
-    /// Enter the supervisor event loop: poll for signals, netlink hot-plug,
-    /// inotify config changes, and control-socket commands. Blocks until
-    /// SIGTERM/SIGINT. When the loop exits, all managed instances are stopped.
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
         self.stopAll();
         for (self.configs.items) |c| {
@@ -694,6 +691,9 @@ pub const Supervisor = struct {
         };
     }
 
+    /// Enter the supervisor event loop: poll for signals, netlink hot-plug,
+    /// inotify config changes, and control-socket commands. Blocks until
+    /// SIGTERM/SIGINT. When the loop exits, all managed instances are stopped.
     pub fn serve(self: *Supervisor, dir_path: []const u8) void {
         defer self.stopAll();
 
