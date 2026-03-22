@@ -523,7 +523,7 @@ pub const Supervisor = struct {
 
         w.writeAll("STATUS") catch return;
         for (self.managed.items) |*m| {
-            const name = m.devname orelse m.phys_key;
+            const name = m.instance.device_cfg.device.name;
             w.print(" device={s} active=true", .{name}) catch break;
         }
         w.writeByte('\n') catch return;
