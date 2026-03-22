@@ -261,6 +261,8 @@ pub fn validate(cfg: *const DeviceConfig) !void {
         if (report.checksum) |cs| {
             if (cs.range.len != 2) return error.InvalidConfig;
             if (cs.range[0] < 0 or cs.range[1] > report.size) return error.InvalidConfig;
+            const expect_end = cs.expect.offset + if (std.mem.eql(u8, cs.algo, "crc32")) @as(i64, 4) else 1;
+            if (expect_end > report.size) return error.InvalidConfig;
         }
     }
 
