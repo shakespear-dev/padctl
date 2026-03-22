@@ -12,11 +12,17 @@ pub const ControlSocket = struct {
     path: []const u8,
     allocator: std.mem.Allocator,
 
-    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.mem.Allocator.Error || error{ChmodFailed};
+    pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.fs.Dir.MakeError || std.mem.Allocator.Error || error{ChmodFailed};
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) InitError!ControlSocket {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
+
+        const dir = std.fs.path.dirname(path) orelse "/run";
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
         // Unlink stale socket
         std.fs.deleteFileAbsolute(path) catch {};

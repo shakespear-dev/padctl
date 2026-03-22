@@ -592,7 +592,7 @@ pub const Supervisor = struct {
             const toml_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path });
 
             const parsed = config_device.parseFile(self.allocator, toml_path) catch |err| {
-                std.log.warn("skip {s}: {}", .{ entry.path, err });
+                std.log.debug("skip {s}: {}", .{ entry.path, err });
                 continue;
             };
             const cfg_ptr = try self.allocator.create(config_device.ParseResult);
