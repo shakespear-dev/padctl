@@ -236,21 +236,11 @@ pub const EventLoop = struct {
         else
             null;
 
-        var iter_count: usize = 0;
         while (self.running) {
             _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
-
-            if (iter_count < 3) {
-                for (self.pollfds[0..self.fd_count], 0..) |pfd, idx| {
-                    if (pfd.revents != 0) {
-                        std.log.info("ppoll iter {d}: slot[{d}] fd={d} revents=0x{x}", .{ iter_count, idx, pfd.fd, pfd.revents });
-                    }
-                }
-            }
-            iter_count += 1;
 
             const now = std.time.nanoTimestamp();
             const dt_ns = now - self.last_ts;
@@ -259,13 +249,17 @@ pub const EventLoop = struct {
 
             // Check signalfd (slot 0)
             if (self.pollfds[0].revents & posix.POLL.IN != 0) {
+                std.log.debug("exit: signalfd fired (slot 0)", .{});
                 var siginfo: [signalfd_siginfo_size]u8 = undefined;
                 _ = posix.read(self.signal_fd, &siginfo) catch {};
                 break;
             }
 
             // Check stop pipe (slot 1)
-            if (self.pollfds[1].revents & posix.POLL.IN != 0) break;
+            if (self.pollfds[1].revents & posix.POLL.IN != 0) {
+                std.log.debug("exit: stop_pipe fired (slot 1)", .{});
+                break;
+            }
 
             // Check timerfd (slot 2)
             if (self.pollfds[2].revents & posix.POLL.IN != 0) {
@@ -368,23 +362,32 @@ pub const EventLoop = struct {
                         };
                         if (maybe_delta) |delta| {
                             if (ctx.mapper) |m| {
-                                const events = try m.apply(delta, dt_ms);
+                                const events = m.apply(delta, dt_ms) catch |err| {
+                                    std.log.err("mapper.apply failed: {}", .{err});
+                                    continue;
+                                };
                                 if (events.timer_request) |tr| switch (tr) {
-                                    .arm => |ms| try armTimer(self.timer_fd, ms),
+                                    .arm => |ms| armTimer(self.timer_fd, ms) catch {},
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
                                 self.gamepad_state.applyDelta(delta);
                                 self.gamepad_state.synthesizeDpadAxes();
-                                try ctx.output.emit(events.gamepad);
-                                if (ctx.touchpad_output) |tp| try tp.emitTouch(events.gamepad);
+                                ctx.output.emit(events.gamepad) catch |err| {
+                                    std.log.err("output.emit failed: {}", .{err});
+                                    continue;
+                                };
+                                if (ctx.touchpad_output) |tp| tp.emitTouch(events.gamepad) catch {};
                                 if (ctx.aux_output) |ao| {
-                                    if (events.aux.len > 0) try ao.emitAux(events.aux.slice());
+                                    if (events.aux.len > 0) ao.emitAux(events.aux.slice()) catch {};
                                 }
                             } else {
                                 self.gamepad_state.applyDelta(delta);
                                 self.gamepad_state.synthesizeDpadAxes();
-                                try ctx.output.emit(self.gamepad_state);
-                                if (ctx.touchpad_output) |tp| try tp.emitTouch(self.gamepad_state);
+                                ctx.output.emit(self.gamepad_state) catch |err| {
+                                    std.log.err("output.emit failed: {}", .{err});
+                                    continue;
+                                };
+                                if (ctx.touchpad_output) |tp| tp.emitTouch(self.gamepad_state) catch {};
                             }
                         }
                     }

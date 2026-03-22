@@ -215,6 +215,7 @@ pub const DeviceInstance = struct {
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
             });
+            std.log.debug("loop.run returned, disconnected={}", .{self.loop.disconnected});
             if (self.loop.disconnected) break;
         }
     }
