@@ -239,7 +239,11 @@ pub const EventLoop = struct {
         while (self.running) {
             _ = posix.ppoll(self.pollfds[0..self.fd_count], if (timeout) |*t| t else null, null) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
-                else => return err,
+                else => {
+                    std.log.err("ppoll failed: {}", .{err});
+                    self.running = false;
+                    break;
+                },
             };
 
             const now = std.time.nanoTimestamp();
@@ -249,15 +253,15 @@ pub const EventLoop = struct {
 
             // Check signalfd (slot 0)
             if (self.pollfds[0].revents & posix.POLL.IN != 0) {
-                std.log.debug("exit: signalfd fired (slot 0)", .{});
                 var siginfo: [signalfd_siginfo_size]u8 = undefined;
                 _ = posix.read(self.signal_fd, &siginfo) catch {};
                 break;
             }
 
-            // Check stop pipe (slot 1)
+            // Check stop pipe (slot 1) — drain byte and return to caller
             if (self.pollfds[1].revents & posix.POLL.IN != 0) {
-                std.log.debug("exit: stop_pipe fired (slot 1)", .{});
+                var drain: [1]u8 = undefined;
+                _ = posix.read(self.stop_r, &drain) catch {};
                 break;
             }
 
@@ -399,7 +403,6 @@ pub const EventLoop = struct {
 
     /// Interrupt a blocking ppoll in run() from another thread.
     pub fn stop(self: *EventLoop) void {
-        self.running = false;
         _ = posix.write(self.stop_w, &[_]u8{1}) catch {};
     }
 

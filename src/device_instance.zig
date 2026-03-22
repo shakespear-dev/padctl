@@ -201,7 +201,7 @@ pub const DeviceInstance = struct {
 
             const mcfg: ?*const MappingConfig = if (mapper_ptr) |m| m.config else self.mapping_cfg;
 
-            try self.loop.run(.{
+            self.loop.run(.{
                 .devices = self.devices,
                 .interpreter = &self.interp,
                 .output = output,
@@ -214,7 +214,10 @@ pub const DeviceInstance = struct {
                 .poll_timeout_ms = self.poll_timeout_ms,
                 .generic_state = if (self.generic_state) |*gs| gs else null,
                 .generic_output = generic_output,
-            });
+            }) catch |err| {
+                std.log.err("event loop failed: {}", .{err});
+                break;
+            };
             std.log.debug("loop.run returned, disconnected={}", .{self.loop.disconnected});
             if (self.loop.disconnected) break;
         }
