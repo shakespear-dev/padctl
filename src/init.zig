@@ -24,6 +24,10 @@ pub fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
 
 fn sendAndWaitPrefix(device: DeviceIO, bytes: []const u8, prefix: []const u8, retries: u16) !void {
     try device.write(bytes);
+    if (prefix.len == 0) {
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+        return;
+    }
     var read_buf: [64]u8 = undefined;
     var attempt: u16 = 0;
     while (attempt < retries) : (attempt += 1) {
@@ -59,13 +63,21 @@ pub fn runInitSequence(
     for (init_config.commands) |cmd| {
         const bytes = try parseHexBytes(allocator, cmd);
         defer allocator.free(bytes);
-        try sendAndWaitPrefix(device, bytes, prefix, 50);
+        sendAndWaitPrefix(device, bytes, prefix, 50) catch |err| {
+            if (err == error.InitFailed) {
+                std.log.warn("init command got no ack, continuing", .{});
+            } else return err;
+        };
     }
 
     if (init_config.enable) |enable_cmd| {
         const bytes = try parseHexBytes(allocator, enable_cmd);
         defer allocator.free(bytes);
-        try sendAndWaitPrefix(device, bytes, prefix, 50);
+        sendAndWaitPrefix(device, bytes, prefix, 50) catch |err| {
+            if (err == error.InitFailed) {
+                std.log.warn("enable command got no ack, continuing", .{});
+            } else return err;
+        };
     }
 }
 
@@ -124,10 +136,10 @@ test "runInitSequence: sends command and matches response_prefix" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x5a, 0xa5, 0x01, 0x01 }, mock.write_log.items);
 }
 
-test "runInitSequence: exhausted retries returns InitFailed" {
+test "runInitSequence: exhausted retries logs warning and continues" {
     const allocator = std.testing.allocator;
 
-    // No frames — every read returns Again → InitFailed after 10 retries
+    // No frames — every read returns Again → warns but does not fail
     var mock = try MockDeviceIO.init(allocator, &.{});
     defer mock.deinit();
     const dev = mock.deviceIO();
@@ -137,7 +149,7 @@ test "runInitSequence: exhausted retries returns InitFailed" {
         .response_prefix = &[_]i64{0x5a},
     };
 
-    try std.testing.expectError(error.InitFailed, runInitSequence(allocator, dev, init_cfg));
+    try runInitSequence(allocator, dev, init_cfg);
 }
 
 test "runInitSequence: enable command sent after commands" {
@@ -160,15 +172,18 @@ test "runInitSequence: enable command sent after commands" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x01, 0x02, 0x02 }, mock.write_log.items);
 }
 
-test "runInitSequence: wrong prefix after retries returns InitFailed" {
+test "runInitSequence: wrong prefix after retries logs warning and continues" {
     const allocator = std.testing.allocator;
 
-    // Response has wrong prefix
+    // Response has wrong prefix — warns but does not fail
     const resp = [_]u8{ 0xff, 0x00 };
-    // Provide 10 identical wrong responses so every retry gets one
+    // Provide 50 identical wrong responses so every retry gets one
     var mock = try MockDeviceIO.init(allocator, &.{
-        &resp, &resp, &resp, &resp, &resp,
-        &resp, &resp, &resp, &resp, &resp,
+        &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp,
+        &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp,
+        &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp,
+        &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp,
+        &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp, &resp,
     });
     defer mock.deinit();
     const dev = mock.deviceIO();
@@ -178,5 +193,5 @@ test "runInitSequence: wrong prefix after retries returns InitFailed" {
         .response_prefix = &[_]i64{ 0x5a, 0xa5 },
     };
 
-    try std.testing.expectError(error.InitFailed, runInitSequence(allocator, dev, init_cfg));
+    try runInitSequence(allocator, dev, init_cfg);
 }
