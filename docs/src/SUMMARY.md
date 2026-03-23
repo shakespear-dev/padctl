@@ -18,4 +18,6 @@
   - [Sony DualShock 4](devices/sony-sony-dualshock-4.md)
   - [Sony DualShock 4 v2](devices/sony-sony-dualshock-4-v2.md)
   - [Valve Steam Deck](devices/valve-valve-steam-deck.md)
-- [Contributing](contributing/device-toml-from-inputplumber.md)
+- [Contributing](contributing/README.md)
+  - [HID Reverse Engineering Guide](contributing/reverse-engineering.md)
+  - [Device TOML from InputPlumber](contributing/device-toml-from-inputplumber.md)
