@@ -13,7 +13,7 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
 
       env = system: zig2nix.outputs.zig-env.${system} {
-        zig = zig2nix.outputs.packages.${system}.zig."0.15.0".bin;
+        zig = zig2nix.outputs.packages.${system}.zig."0.15.2".bin;
       };
     in
     {
