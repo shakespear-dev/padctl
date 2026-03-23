@@ -37,7 +37,7 @@ sudo systemctl enable --now padctl.service   # start daemon with hotplug support
 padctl scan                                  # check detected devices
 ```
 
-See the [getting started guide](https://bananasjim.github.io/padctl/getting-started/) for detailed setup.
+See the [getting started guide](https://bananasjim.github.io/padctl/getting-started.html) for detailed setup.
 
 ## Build
 
@@ -46,7 +46,7 @@ See the [getting started guide](https://bananasjim.github.io/padctl/getting-star
 ```sh
 zig build              # build all binaries
 zig build test         # run unit tests
-zig build check-all    # all checks (test + tsan + safe + fmt)
+zig build check-all    # all checks (test + safe + fmt)
 ```
 
 | Flag | Default | Effect |
@@ -58,10 +58,10 @@ zig build check-all    # all checks (test + tsan + safe + fmt)
 
 Full documentation: [bananasjim.github.io/padctl](https://bananasjim.github.io/padctl/)
 
-- [Device config reference](https://bananasjim.github.io/padctl/devices/)
-- [Mapping config guide](https://bananasjim.github.io/padctl/mapping/)
-- [Architecture](https://bananasjim.github.io/padctl/architecture/)
-- [CLI reference](https://bananasjim.github.io/padctl/cli/)
+- [Getting started](https://bananasjim.github.io/padctl/getting-started.html)
+- [Device config reference](https://bananasjim.github.io/padctl/device-config.html)
+- [Mapping config reference](https://bananasjim.github.io/padctl/mapping-config.html)
+- [Supported devices](https://bananasjim.github.io/padctl/devices/)
 
 ## Contributing
 
