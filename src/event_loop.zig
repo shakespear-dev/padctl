@@ -143,6 +143,7 @@ pub const EventLoop = struct {
     running: bool,
     gamepad_state: state.GamepadState,
     last_ts: i128,
+    last_rumble_ns: i128,
 
     pub fn init() !EventLoop {
         var mask = posix.sigemptyset();
@@ -190,6 +191,7 @@ pub const EventLoop = struct {
             .running = false,
             .gamepad_state = .{},
             .last_ts = std.time.nanoTimestamp(),
+            .last_rumble_ns = 0,
         };
 
         // slot 0 = signalfd (or dummy pipe), slot 1 = stop pipe, slot 2 = timerfd
@@ -281,21 +283,26 @@ pub const EventLoop = struct {
             if (self.uinput_ff_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
                     if (ctx.output.pollFf() catch null) |ff_ev| {
-                        if (ctx.allocator) |alloc| {
-                            if (ctx.device_config) |dcfg| {
-                                if (dcfg.commands) |cmds| {
-                                    const ff_type = if (dcfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
-                                    if (cmds.map.get(ff_type)) |cmd| {
-                                        const iface_idx: usize = @intCast(cmd.interface);
-                                        if (iface_idx < ctx.devices.len) {
-                                            const params = [_]Param{
-                                                .{ .name = "strong", .value = ff_ev.strong },
-                                                .{ .name = "weak", .value = ff_ev.weak },
-                                            };
-                                            if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
-                                                defer alloc.free(bytes);
-                                                ctx.devices[iface_idx].write(bytes) catch {};
-                                            } else |_| {}
+                        const now_ns = std.time.nanoTimestamp();
+                        const min_interval_ns: i128 = 10_000_000; // 10ms
+                        if (now_ns - self.last_rumble_ns >= min_interval_ns) {
+                            if (ctx.allocator) |alloc| {
+                                if (ctx.device_config) |dcfg| {
+                                    if (dcfg.commands) |cmds| {
+                                        const ff_type = if (dcfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
+                                        if (cmds.map.get(ff_type)) |cmd| {
+                                            const iface_idx: usize = @intCast(cmd.interface);
+                                            if (iface_idx < ctx.devices.len) {
+                                                const params = [_]Param{
+                                                    .{ .name = "strong", .value = ff_ev.strong },
+                                                    .{ .name = "weak", .value = ff_ev.weak },
+                                                };
+                                                if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
+                                                    defer alloc.free(bytes);
+                                                    ctx.devices[iface_idx].write(bytes) catch {};
+                                                    self.last_rumble_ns = now_ns;
+                                                } else |_| {}
+                                            }
                                         }
                                     }
                                 }
