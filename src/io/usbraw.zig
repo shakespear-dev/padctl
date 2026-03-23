@@ -1,7 +1,20 @@
 const std = @import("std");
 const io = @import("device_io.zig");
 
-const is_test = @import("builtin").is_test;
+const builtin = @import("builtin");
+const is_test = builtin.is_test;
+
+// Zig's futex-based Mutex lacks TSan annotations, so pthread_mutex is
+// used when ThreadSanitizer is active to provide proper happens-before edges.
+const Mutex = if (builtin.sanitize_thread) struct {
+    m: std.c.pthread_mutex_t = .{},
+    fn lock(self: *@This()) void {
+        std.debug.assert(std.c.pthread_mutex_lock(&self.m) == .SUCCESS);
+    }
+    fn unlock(self: *@This()) void {
+        std.debug.assert(std.c.pthread_mutex_unlock(&self.m) == .SUCCESS);
+    }
+} else std.Thread.Mutex;
 
 pub const DeviceIO = io.DeviceIO;
 
@@ -20,7 +33,7 @@ pub const RingBuffer = struct {
     head: usize = 0, // next write pos
     tail: usize = 0, // next read pos
     count: usize = 0,
-    mu: std.Thread.Mutex = .{},
+    mu: Mutex = .{},
 
     pub fn push(self: *RingBuffer, data: []const u8) void {
         self.mu.lock();
@@ -280,7 +293,6 @@ test "RingBuffer concurrent push/pop" {
             last_seen = val;
             pop_count += 1;
         } else {
-            // yield to let producer make progress
             std.Thread.yield() catch {};
         }
     }
