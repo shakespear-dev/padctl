@@ -177,6 +177,10 @@ pub fn build(b: *std.Build) void {
     check_all.dependOn(safe_step);
     check_all.dependOn(fmt_step);
 
+    // fuzz: continuous fuzzing (zig build fuzz --fuzz)
+    const fuzz_step = b.step("fuzz", "Fuzz test (use: zig build fuzz --fuzz)");
+    fuzz_step.dependOn(&b.addRunArtifact(unit_tests).step);
+
     // capture L0 tests (analyse pure functions)
     const capture_tests = b.addTest(.{ .root_module = capture_analyse_mod });
     if (coverage) capture_tests.setExecCmd(&.{ "kcov", "--include-path=src/", "kcov-output", null });
@@ -184,7 +188,22 @@ pub fn build(b: *std.Build) void {
 
     // test-integration: Layer 2 (UHID, requires privilege)
     const integration_step = b.step("test-integration", "Run Layer 2 integration tests (UHID, local)");
-    _ = integration_step;
+    const integ_mod = b.createModule(.{
+        .root_source_file = b.path("src/test/uhid_integration_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_c = .trap,
+    });
+    integ_mod.addImport("toml", toml_mod);
+    integ_mod.addImport("src", src_mod);
+    const integ_tests = b.addTest(.{ .root_module = integ_mod });
+    if (use_libusb) {
+        integ_tests.linkSystemLibrary("usb-1.0");
+    } else {
+        integ_tests.addIncludePath(b.path("compat"));
+    }
+    integ_tests.linkLibC();
+    integration_step.dependOn(&b.addRunArtifact(integ_tests).step);
 
     // test-e2e: Layer 3 (real hardware)
     const e2e_step = b.step("test-e2e", "Run Layer 3 end-to-end tests (real hardware)");
