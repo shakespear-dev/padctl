@@ -44,9 +44,6 @@ const InotifyResult = struct {
     config_dir: ?[]const u8,
 };
 
-var test_switch_mapping_override: ?[]const u8 = null;
-var test_switch_fail_commit_index: ?usize = null;
-
 const SwitchTx = struct {
     idx: usize,
     new_mapper: ?Mapper,
@@ -57,9 +54,9 @@ const SwitchTx = struct {
     committed: bool = false,
 };
 
-fn shouldInjectSwitchFailure(commit_index: usize) bool {
+fn shouldInjectSwitchFailure(self: *const Supervisor, commit_index: usize) bool {
     if (!builtin.is_test) return false;
-    return test_switch_fail_commit_index != null and test_switch_fail_commit_index.? == commit_index;
+    return self.test_switch_fail_commit_index != null and self.test_switch_fail_commit_index.? == commit_index;
 }
 
 fn initInotify(allocator: std.mem.Allocator) InotifyResult {
@@ -144,6 +141,8 @@ pub const Supervisor = struct {
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
+    test_switch_mapping_override: ?[]const u8 = null,
+    test_switch_fail_commit_index: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) !Supervisor {
         var stop_mask = posix.sigemptyset();
@@ -184,6 +183,8 @@ pub const Supervisor = struct {
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = sock,
+            .test_switch_mapping_override = null,
+            .test_switch_fail_commit_index = null,
         };
     }
 
@@ -204,11 +205,14 @@ pub const Supervisor = struct {
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = null,
+            .test_switch_mapping_override = null,
+            .test_switch_fail_commit_index = null,
         };
     }
 
     pub fn deinit(self: *Supervisor) void {
         if (self.ctrl_sock) |*cs| cs.deinit();
+        if (self.test_switch_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
@@ -311,7 +315,7 @@ pub const Supervisor = struct {
 
     fn lookupSwitchMappingPath(self: *Supervisor, name: []const u8) !?[]const u8 {
         if (builtin.is_test) {
-            if (test_switch_mapping_override) |override_path| {
+            if (self.test_switch_mapping_override) |override_path| {
                 return @as(?[]const u8, try self.allocator.dupe(u8, override_path));
             }
         }
@@ -351,6 +355,8 @@ pub const Supervisor = struct {
             const tx = &txs[r];
             if (!tx.committed) continue;
             const m = &self.managed.items[tx.idx];
+            m.instance.stop();
+            m.thread.join();
             self.restoreSwitchTarget(tx, m, true);
         }
     }
@@ -382,7 +388,7 @@ pub const Supervisor = struct {
         m.instance.stop();
         m.thread.join();
 
-        if (builtin.is_test and test_switch_fail_commit_index != null and test_switch_fail_commit_index.? == tx.idx) {
+        if (builtin.is_test and self.test_switch_fail_commit_index != null and self.test_switch_fail_commit_index.? == tx.idx) {
             self.restoreSwitchTarget(tx, m, false);
             return error.SwitchFailed;
         }
@@ -481,19 +487,28 @@ pub const Supervisor = struct {
                 m.thread.join();
                 self.clearSwitchMapping(m);
 
+                var old_mapper = m.instance.mapper;
+                const old_mapping_cfg = m.instance.mapping_cfg;
                 _ = m.mapping_arena.reset(.retain_capacity);
                 const arena_alloc = m.mapping_arena.allocator();
                 const map_copy = try arena_alloc.create(MappingConfig);
                 map_copy.* = new_map.*;
 
-                // Reset instance state for restart
-                if (m.instance.mapper) |*mapper| {
-                    mapper.config = map_copy;
-                } else {
-                    m.instance.mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
-                }
+                // Rebuild the mapper so layer state/timers do not keep slices into
+                // the old mapping arena after the reset above.
+                var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
+                m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
-                try restartManagedThread(m);
+                restartManagedThread(m) catch |err| {
+                    m.instance.mapper = old_mapper;
+                    m.instance.mapping_cfg = old_mapping_cfg;
+                    new_mapper.deinit();
+                    return err;
+                };
+
+                if (old_mapper) |*mapper| {
+                    mapper.deinit();
+                }
             } else {
                 const m = found.?;
                 m.instance.stop();
@@ -766,7 +781,7 @@ pub const Supervisor = struct {
         }
 
         for (txs.items, 0..) |*tx, commit_idx| {
-            if (shouldInjectSwitchFailure(commit_idx)) {
+            if (shouldInjectSwitchFailure(self, commit_idx)) {
                 self.rollbackCommittedSwitches(txs.items);
                 cs.sendResponse(fd, "ERR switch-failed\n");
                 return;
@@ -1272,13 +1287,8 @@ test "Supervisor: global SWITCH rolls back all devices on failure" {
     try sup.spawnInstance("usb-1-1", inst_a);
     try sup.spawnInstance("usb-1-2", inst_b);
 
-    test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
-    defer {
-        if (test_switch_mapping_override) |p| allocator.free(p);
-        test_switch_mapping_override = null;
-    }
-    test_switch_fail_commit_index = 1;
-    defer test_switch_fail_commit_index = null;
+    sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
+    sup.test_switch_fail_commit_index = 1;
 
     sup.handleSwitch(resp_fds[0], "fps", null);
 
@@ -1448,6 +1458,7 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     const entry2 = ConfigEntry{ .phys_key = "usb-1-1", .device_cfg = &parsed_dev.value, .mapping_cfg = &map2 };
 
     try sup.reload(&.{entry1}, testInitFn);
+    sup.managed.items[0].instance.mapper.?.next_token = 42;
     try sup.reload(&.{entry2}, testInitFn);
     defer {
         sup.stopAll();
@@ -1455,6 +1466,8 @@ test "Supervisor: two rapid reloads serialize — no race condition" {
     }
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
+    try testing.expect(sup.managed.items[0].instance.mapper != null);
+    try testing.expectEqual(@as(u32, 1), sup.managed.items[0].instance.mapper.?.next_token);
 }
 
 test "Supervisor: reload null mapping clears existing mapper" {
