@@ -20,6 +20,44 @@ padctl is a userspace daemon that maps vendor-specific USB/HID gamepad reports t
 - **Hot-reload** — `SIGHUP` re-reads configs without restart, diffed per physical device
 - **Force feedback** — FF_RUMBLE passthrough from uinput to physical device
 
+## Architecture (Simplified)
+
+```mermaid
+flowchart TD
+  A["Physical device (USB/BT)"]
+
+  A --> B["HID class interface"]
+  B --> C["/dev/hidrawN"]
+  C --> D["io/hidraw.zig"]
+
+  A --> E["Vendor class interface"]
+  E --> F["libusb"]
+  F --> G["io/usbraw.zig"]
+
+  D --> H["DeviceIO unified interface"]
+  G --> H
+  H --> I["ppoll event loop (main.zig)"]
+
+  I --> J["config/device.zig<br/>(devices/*.toml)"]
+  I --> K["io/hotplug.zig<br/>(udev monitor)"]
+
+  J --> L["[input rules]"]
+  J --> M["[output] DSL (OutputConfig)"]
+
+  L --> N["core/interpreter.zig"]
+  N --> O["core/state.zig (GamepadState)"]
+  O --> P["core/mapper.zig<br/>(layer switch + remap)"]
+  M --> P
+
+  P --> Q["Gamepad mode"]
+  P --> R["Generic mode"]
+
+  Q --> Q1["UinputDevice ([output])"]
+  Q --> Q2["AuxDevice ([output.aux])"]
+  R --> R1["GenericUinputDevice ([output.mapping])"]
+  R --> R2["TouchpadDevice ([output.touchpad])"]
+```
+
 ## Supported Devices
 
 Ships with configs for **12 devices** across 8 vendors:
