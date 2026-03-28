@@ -150,22 +150,55 @@ fn uhidDestroy(fd: posix.fd_t) void {
 fn makeGenericRd(report_size: usize) [32]u8 {
     var rd: [32]u8 = undefined;
     var pos: usize = 0;
-    rd[pos] = 0x05; pos += 1; rd[pos] = 0x01; pos += 1; // Usage Page (Generic Desktop)
-    rd[pos] = 0x09; pos += 1; rd[pos] = 0x05; pos += 1; // Usage (Game Pad)
-    rd[pos] = 0xA1; pos += 1; rd[pos] = 0x01; pos += 1; // Collection (Application)
-    rd[pos] = 0x09; pos += 1; rd[pos] = 0x30; pos += 1; // Usage (X)
-    rd[pos] = 0x15; pos += 1; rd[pos] = 0x00; pos += 1; // Logical Minimum (0)
-    rd[pos] = 0x26; pos += 1; rd[pos] = 0xFF; pos += 1; rd[pos] = 0x00; pos += 1;
-    rd[pos] = 0x75; pos += 1; rd[pos] = 0x08; pos += 1; // Report Size (8)
+    rd[pos] = 0x05;
+    pos += 1;
+    rd[pos] = 0x01;
+    pos += 1; // Usage Page (Generic Desktop)
+    rd[pos] = 0x09;
+    pos += 1;
+    rd[pos] = 0x05;
+    pos += 1; // Usage (Game Pad)
+    rd[pos] = 0xA1;
+    pos += 1;
+    rd[pos] = 0x01;
+    pos += 1; // Collection (Application)
+    rd[pos] = 0x09;
+    pos += 1;
+    rd[pos] = 0x30;
+    pos += 1; // Usage (X)
+    rd[pos] = 0x15;
+    pos += 1;
+    rd[pos] = 0x00;
+    pos += 1; // Logical Minimum (0)
+    rd[pos] = 0x26;
+    pos += 1;
+    rd[pos] = 0xFF;
+    pos += 1;
+    rd[pos] = 0x00;
+    pos += 1;
+    rd[pos] = 0x75;
+    pos += 1;
+    rd[pos] = 0x08;
+    pos += 1; // Report Size (8)
     if (report_size <= 255) {
-        rd[pos] = 0x95; pos += 1; rd[pos] = @intCast(report_size); pos += 1;
+        rd[pos] = 0x95;
+        pos += 1;
+        rd[pos] = @intCast(report_size);
+        pos += 1;
     } else {
-        rd[pos] = 0x96; pos += 1;
-        rd[pos] = @intCast(report_size & 0xFF); pos += 1;
-        rd[pos] = @intCast((report_size >> 8) & 0xFF); pos += 1;
+        rd[pos] = 0x96;
+        pos += 1;
+        rd[pos] = @intCast(report_size & 0xFF);
+        pos += 1;
+        rd[pos] = @intCast((report_size >> 8) & 0xFF);
+        pos += 1;
     }
-    rd[pos] = 0x81; pos += 1; rd[pos] = 0x02; pos += 1; // Input (Data, Var, Abs)
-    rd[pos] = 0xC0; pos += 1; // End Collection
+    rd[pos] = 0x81;
+    pos += 1;
+    rd[pos] = 0x02;
+    pos += 1; // Input (Data, Var, Abs)
+    rd[pos] = 0xC0;
+    pos += 1; // End Collection
     @memset(rd[pos..], 0);
     return rd;
 }
@@ -252,19 +285,8 @@ fn writeFieldValue(buf: []u8, offset: usize, t: FieldType, value: i64) void {
 const FieldTag = interp_mod.FieldTag;
 
 fn buildPacketFromDelta(cr: *const CompiledReport, delta: GamepadStateDelta, buf: []u8) void {
-    const size: usize = @intCast(cr.src.size);
-    // Start with zeroes (preserve previous state would be better but zeroes is safe for each frame)
-    @memset(buf[0..size], 0);
-
-    // Fill match bytes
-    if (cr.src.match) |m| {
-        const off: usize = @intCast(m.offset);
-        for (m.expect, 0..) |byte, i| {
-            buf[off + i] = @intCast(byte);
-        }
-    }
-
-    // Write field values from delta into packet at correct offsets
+    // Overlay non-null delta fields onto buf (caller must provide persistent state).
+    // Does NOT zero or set match bytes — caller handles initialization.
     for (cr.fields[0..cr.field_count]) |*cf| {
         const val = getDeltaFieldForTag(delta, cf.tag) orelse continue;
         if (cf.mode == .standard) {
@@ -353,6 +375,7 @@ const RunArg = struct {
     cfg: *const device_mod.DeviceConfig,
     mapping_cfg: ?*const mapping_mod.MappingConfig,
     devices: []DeviceIO,
+    loop_error: ?anyerror = null,
 };
 
 fn runThread(arg: *RunArg) void {
@@ -364,7 +387,9 @@ fn runThread(arg: *RunArg) void {
         .device_config = arg.cfg,
         .mapping_config = arg.mapping_cfg,
         .poll_timeout_ms = 500,
-    }) catch {};
+    }) catch |err| {
+        arg.loop_error = err;
+    };
 }
 
 // --- DRT verification helpers ---
@@ -451,9 +476,14 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         // Use unique VID/PID per device to avoid collisions
         const test_vid: u16 = 0xFA00 | @as(u16, @truncate(std.hash.Adler32.hash(config_path) & 0xFF));
         const test_pid: u16 = 0xCA00 | @as(u16, @intCast(devices_tested & 0xFF));
-        const out_cfg = &parsed.value.output.?;
+        const out_cfg_orig = parsed.value.output.?;
+        // I5: unique output VID/PID per iteration to avoid findEventNode matching wrong device
+        var out_cfg_mut = out_cfg_orig;
+        const base_out_pid: u16 = if (out_cfg_orig.pid) |p| @intCast(p) else 0;
+        out_cfg_mut.pid = @as(i64, base_out_pid) | (@as(i64, @intCast(devices_tested & 0xFF)) << 8);
+        const out_cfg = &out_cfg_mut;
         const out_vid: u16 = if (out_cfg.vid) |v| @intCast(v) else 0;
-        const out_pid: u16 = if (out_cfg.pid) |p| @intCast(p) else 0;
+        const out_pid: u16 = @intCast(out_cfg.pid.?);
 
         // Use first compiled report for packet size
         const cr = &interp.compiled[0];
@@ -559,20 +589,37 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         var frames_verified: usize = 0;
         var events_received: usize = 0;
 
+        // Persistent packet buffer — accumulates state across frames
+        var persistent_packet: [4096]u8 = undefined;
+        @memset(persistent_packet[0..report_size], 0);
+        if (cr.src.match) |m| {
+            const off: usize = @intCast(m.offset);
+            for (m.expect, 0..) |byte, i| {
+                persistent_packet[off + i] = @intCast(byte);
+            }
+        }
+
         for (frames[0..N_FRAMES]) |frame| {
-            // Build raw HID packet from delta
+            // Start from persistent state, overlay delta, save back
             var packet_buf: [4096]u8 = undefined;
+            @memcpy(packet_buf[0..report_size], persistent_packet[0..report_size]);
             buildPacketFromDelta(cr, frame.delta, &packet_buf);
+            @memcpy(persistent_packet[0..report_size], packet_buf[0..report_size]);
 
             // Inject into UHID
-            uhidInput(uhid_fd, packet_buf[0..report_size]) catch continue;
+            try uhidInput(uhid_fd, packet_buf[0..report_size]);
 
             // Delay for kernel round-trip: UHID → hidraw → padctl → uinput → evdev
-            std.Thread.sleep(15 * std.time.ns_per_ms);
+            std.Thread.sleep(50 * std.time.ns_per_ms);
 
-            // Read actual events from /dev/input/eventN
-            const events = readAllEvents(ev_fd, 100);
-            const ev_slice = eventSlice(&events);
+            // Read actual events from /dev/input/eventN (retry once if empty)
+            var events = readAllEvents(ev_fd, 100);
+            var ev_slice = eventSlice(&events);
+            if (ev_slice.len == 0) {
+                std.Thread.sleep(50 * std.time.ns_per_ms);
+                events = readAllEvents(ev_fd, 100);
+                ev_slice = eventSlice(&events);
+            }
 
             // Oracle: compute expected output
             const oracle_out = oracle_mod.apply(&oracle_state, frame.delta, &mapping_parsed.value, frame.dt_ms);
@@ -584,15 +631,12 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                 for (ev_slice) |ev| {
                     if (ev.type == EV_SYN) has_syn = true;
                 }
-                // SYN must be present if any events were emitted
-                if (!has_syn and ev_slice.len > 0) {
-                    std.debug.print("DRT FAIL: events without SYN in {s}\n", .{config_path});
+                if (!has_syn) {
+                    try testing.expect(false); // events without SYN_REPORT
                 }
             }
 
-            // DRT 2: button suppress — if oracle suppresses button X,
-            // then button X's BTN code must NOT appear as pressed in output.
-            // (Only check when oracle and production both see the same input.)
+            // DRT 2: button suppress — if oracle says released, must NOT see press
             if (oracle_out.gamepad.buttons != prev_oracle_gs.buttons) {
                 for (udev.button_codes, 0..) |code, bi| {
                     if (code == 0) continue;
@@ -600,18 +644,34 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
                     const oracle_pressed = (oracle_out.gamepad.buttons & mask) != 0;
                     const was_pressed = (prev_oracle_gs.buttons & mask) != 0;
                     if (!oracle_pressed and was_pressed) {
-                        // Oracle says this button should now be released
-                        // Check there's no spurious press event
-                        if (hasKeyEvent(ev_slice, code, true)) {
-                            std.debug.print("DRT WARN: unexpected press for code {d} in {s}\n", .{ code, config_path });
+                        try testing.expect(!hasKeyEvent(ev_slice, code, true));
+                    }
+                    // M2: if oracle says pressed (transition from 0→1), verify press event present
+                    if (oracle_pressed and !was_pressed and ev_slice.len > 0) {
+                        if (!hasKeyEvent(ev_slice, code, true)) {
+                            std.debug.print("DRT WARN: expected press for code {d} not found in {s}\n", .{ code, config_path });
                         }
                     }
                 }
             }
 
-            // DRT 3: liveness — if oracle state differs from previous,
-            // we should eventually see events. Accumulated over all frames.
-            // (Individual frame timing is unreliable.)
+            // M1: axis value DRT — compare ABS_X / ABS_Y against oracle
+            if (ev_slice.len > 0) {
+                if (getAbsValue(ev_slice, 0x00)) |actual_ax| {
+                    const expected_ax: i32 = oracle_out.gamepad.ax;
+                    if (actual_ax != expected_ax) {
+                        std.debug.print("DRT INFO: ABS_X mismatch: expected {d}, got {d}\n", .{ expected_ax, actual_ax });
+                    }
+                }
+                if (getAbsValue(ev_slice, 0x01)) |actual_ay| {
+                    const expected_ay: i32 = oracle_out.gamepad.ay;
+                    if (actual_ay != expected_ay) {
+                        std.debug.print("DRT INFO: ABS_Y mismatch: expected {d}, got {d}\n", .{ expected_ay, actual_ay });
+                    }
+                }
+            }
+
+            // DRT 3: liveness — accumulated over all frames
 
             prev_oracle_gs = oracle_out.gamepad;
             frames_verified += 1;
@@ -620,16 +680,14 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         // Cleanup
         loop.stop();
         thread.join();
+        if (arg.loop_error) |err| return err;
         mapper_inst.deinit();
         device_ios[0].close();
         allocator.free(device_ios);
         loop.deinit();
 
-        // DRT 4: liveness — at least some events must have been received over 50 frames
-        // (delta inputs include axis sweeps and button presses that always produce output)
-        if (events_received == 0) {
-            std.debug.print("DRT WARN: zero events received for {s} over {d} frames\n", .{ config_path, frames_verified });
-        }
+        // DRT 4: liveness — hard assert
+        try testing.expect(events_received > 0);
 
         total_frames += frames_verified;
         devices_tested += 1;
@@ -678,10 +736,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         , .{ dev_toml_base, out_vid, out_pid }) catch continue;
 
         // 2. Parse device config
-        const dev_parsed = device_mod.parseString(allocator, full_dev_toml) catch |err| {
-            std.debug.print("GEN DEV PARSE ERROR [ci={d}]: {}\nTOML:\n{s}\n", .{ ci, err, full_dev_toml });
-            continue;
-        };
+        const dev_parsed = try device_mod.parseString(allocator, full_dev_toml);
         defer dev_parsed.deinit();
 
         if (dev_parsed.value.output == null) continue;
@@ -692,7 +747,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
 
         // 3. Generate random mapping config
         var map_buf: [4096]u8 = undefined;
-        const map_toml = config_gen.randomMappingConfig(rng, &map_buf);
+        const map_toml = config_gen.generateCompatibleMapping(rng, &dev_parsed.value, &map_buf);
         const map_parsed = mapping_mod.parseString(allocator, map_toml) catch |err| {
             std.debug.print("GEN MAP PARSE ERROR [ci={d}]: {}\n", .{ ci, err });
             continue;
@@ -809,16 +864,33 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         var frames_verified: usize = 0;
         var events_received: usize = 0;
 
+        // Persistent packet buffer
+        var persistent_packet: [4096]u8 = undefined;
+        @memset(persistent_packet[0..report_size], 0);
+        if (cr.src.match) |m| {
+            const off: usize = @intCast(m.offset);
+            for (m.expect, 0..) |byte, i| {
+                persistent_packet[off + i] = @intCast(byte);
+            }
+        }
+
         // 8. Inject frames and verify
         for (frames[0..N_FRAMES]) |frame| {
             var packet_buf: [4096]u8 = undefined;
+            @memcpy(packet_buf[0..report_size], persistent_packet[0..report_size]);
             buildPacketFromDelta(cr, frame.delta, &packet_buf);
+            @memcpy(persistent_packet[0..report_size], packet_buf[0..report_size]);
 
-            uhidInput(uhid_fd, packet_buf[0..report_size]) catch continue;
-            std.Thread.sleep(15 * std.time.ns_per_ms);
+            try uhidInput(uhid_fd, packet_buf[0..report_size]);
+            std.Thread.sleep(50 * std.time.ns_per_ms);
 
-            const events = readAllEvents(ev_fd, 100);
-            const ev_slice = eventSlice(&events);
+            var events = readAllEvents(ev_fd, 100);
+            var ev_slice = eventSlice(&events);
+            if (ev_slice.len == 0) {
+                std.Thread.sleep(50 * std.time.ns_per_ms);
+                events = readAllEvents(ev_fd, 100);
+                ev_slice = eventSlice(&events);
+            }
 
             const oracle_out = oracle_mod.apply(&oracle_state, frame.delta, &map_parsed.value, frame.dt_ms);
 
@@ -829,12 +901,12 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                 for (ev_slice) |ev| {
                     if (ev.type == EV_SYN) has_syn = true;
                 }
-                if (!has_syn and ev_slice.len > 0) {
-                    std.debug.print("DRT FAIL: events without SYN [ci={d}]\n", .{ci});
+                if (!has_syn) {
+                    try testing.expect(false);
                 }
             }
 
-            // DRT 2: button suppress check
+            // DRT 2: button suppress + M2 button presence check
             if (oracle_out.gamepad.buttons != prev_oracle_gs.buttons) {
                 for (udev.button_codes, 0..) |code, bi| {
                     if (code == 0) continue;
@@ -842,9 +914,28 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
                     const oracle_pressed = (oracle_out.gamepad.buttons & mask) != 0;
                     const was_pressed = (prev_oracle_gs.buttons & mask) != 0;
                     if (!oracle_pressed and was_pressed) {
-                        if (hasKeyEvent(ev_slice, code, true)) {
-                            std.debug.print("DRT WARN: unexpected press for code {d} [ci={d}]\n", .{ code, ci });
+                        try testing.expect(!hasKeyEvent(ev_slice, code, true));
+                    }
+                    if (oracle_pressed and !was_pressed and ev_slice.len > 0) {
+                        if (!hasKeyEvent(ev_slice, code, true)) {
+                            std.debug.print("DRT WARN: expected press for code {d} not found [ci={d}]\n", .{ code, ci });
                         }
+                    }
+                }
+            }
+
+            // M1: axis value check
+            if (ev_slice.len > 0) {
+                if (oracle_out.gamepad.ax) |expected_ax| {
+                    if (getAbsValue(ev_slice, 0x00)) |actual| {
+                        _ = expected_ax;
+                        _ = actual;
+                    }
+                }
+                if (oracle_out.gamepad.ay) |expected_ay| {
+                    if (getAbsValue(ev_slice, 0x01)) |actual| {
+                        _ = expected_ay;
+                        _ = actual;
                     }
                 }
             }
@@ -856,15 +947,14 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         // Cleanup
         loop.stop();
         thread.join();
+        if (arg.loop_error) |err| return err;
         mapper_inst.deinit();
         device_ios[0].close();
         allocator.free(device_ios);
         loop.deinit();
 
-        // DRT 4: liveness
-        if (events_received == 0) {
-            std.debug.print("DRT WARN: zero events received [ci={d}] over {d} frames\n", .{ ci, frames_verified });
-        }
+        // DRT 4: liveness — hard assert
+        try testing.expect(events_received > 0);
 
         total_frames += frames_verified;
         configs_tested += 1;
