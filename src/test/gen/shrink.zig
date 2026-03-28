@@ -122,3 +122,60 @@ fn simplifyDeltas(frames: []Frame, ctx: *anyopaque, checkFn: CheckFn) void {
         }
     }
 }
+
+// --- tests ---
+
+const testing = std.testing;
+
+fn makeFrame(ax: ?i16) Frame {
+    return .{ .delta = .{ .ax = ax }, .dt_ms = 0 };
+}
+
+// alwaysTrue: failure reproduces on any non-empty sequence
+fn alwaysTrue(_: *anyopaque, frames: []const Frame) bool {
+    return frames.len > 0;
+}
+
+// firstFrame: failure reproduces only when first frame has ax != null
+fn firstFrame(_: *anyopaque, frames: []const Frame) bool {
+    return frames.len > 0 and frames[0].delta.ax != null;
+}
+
+test "shrink: empty input returns empty" {
+    const result = try shrinkSequence(testing.allocator, &.{}, undefined, alwaysTrue);
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "shrink: single reproducing frame is kept" {
+    const input = [_]Frame{makeFrame(42)};
+    const result = try shrinkSequence(testing.allocator, &input, undefined, alwaysTrue);
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 1), result.len);
+}
+
+test "shrink: reduces to minimal reproducing prefix" {
+    // failure only when first frame present — binary trim should reduce to 1
+    var input: [8]Frame = undefined;
+    for (&input, 0..) |*f, i| f.* = makeFrame(@intCast(i));
+    const result = try shrinkSequence(testing.allocator, &input, undefined, firstFrame);
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expect(result[0].delta.ax != null);
+}
+
+test "shrink: simplifyDeltas nulls irrelevant delta fields" {
+    // failure reproduces regardless of ax value — simplify should null it
+    const alwaysTrueIgnoreAx = struct {
+        fn check(_: *anyopaque, _: []const Frame) bool {
+            return true;
+        }
+    }.check;
+
+    var input = [_]Frame{.{ .delta = .{ .ax = 100, .ay = 200 }, .dt_ms = 0 }};
+    const result = try shrinkSequence(testing.allocator, &input, undefined, alwaysTrueIgnoreAx);
+    defer testing.allocator.free(result);
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqual(@as(?i16, null), result[0].delta.ax);
+    try testing.expectEqual(@as(?i16, null), result[0].delta.ay);
+}

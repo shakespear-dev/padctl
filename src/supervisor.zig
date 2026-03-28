@@ -1379,7 +1379,6 @@ test "supervisor: Supervisor: SIGHUP updates mapping without restarting instance
     };
 
     try sup.reload(&.{entry}, testInitFn);
-    std.Thread.sleep(20 * std.time.ns_per_ms);
 
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     try testing.expectEqualStrings("usb-1-1", sup.managed.items[0].phys_key);

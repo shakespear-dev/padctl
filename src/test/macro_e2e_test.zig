@@ -112,7 +112,8 @@ test "macro: multi-device — stop(A) does not affect B" {
     const ta = try std.Thread.spawn(.{}, RunFn.run, .{&inst_a});
     const tb = try std.Thread.spawn(.{}, RunFn.run, .{&inst_b});
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    try h.waitRunning(&inst_a.loop);
+    try h.waitRunning(&inst_b.loop);
 
     // Stop A; B should keep running.
     inst_a.stop();
@@ -365,11 +366,16 @@ test "macro: hot-reload — updateMapping swaps config; next apply uses new mapp
     };
     const thread = try std.Thread.spawn(.{}, RunFn.run, .{&inst});
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    try h.waitRunning(&inst.loop);
 
     // Hot-swap: replace mapping with new_toml config.
     inst.updateMapping(&parsed_new.value);
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    // poll until pending_mapping is consumed (applied on the next loop iteration)
+    var w: usize = 0;
+    while (w < 1000) : (w += 1) {
+        if (@atomicLoad(?*mapping.MappingConfig, &inst.pending_mapping, .acquire) == null) break;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
 
     inst.stop();
     thread.join();
