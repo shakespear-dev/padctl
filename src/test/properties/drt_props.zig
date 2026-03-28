@@ -74,7 +74,7 @@ fn hatDecode(hat: i64) struct { x: i8, y: i8 } {
 test "DRT: production interpreter matches reference oracle on random packets" {
     const allocator = testing.allocator;
     var paths = try helpers.collectTomlPaths(allocator);
-    defer helpers.freeTomlPaths(allocator, &paths);
+    defer paths.deinit(allocator);
 
     var rng = std.Random.DefaultPrng.init(0xC0FFEE_42);
     const random = rng.random();
