@@ -3,6 +3,17 @@ const std = @import("std");
 const mapping = @import("../config/mapping.zig");
 const mapper_mod = @import("../core/mapper.zig");
 const state_mod = @import("../core/state.zig");
+const EventLoop = @import("../event_loop.zig").EventLoop;
+
+/// Poll until loop.running == true, or 1s timeout (returns error.Timeout).
+pub fn waitRunning(loop: *const EventLoop) !void {
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        if (@atomicLoad(bool, &loop.running, .acquire)) return;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
 
 pub const Mapper = mapper_mod.Mapper;
 pub const ButtonId = state_mod.ButtonId;

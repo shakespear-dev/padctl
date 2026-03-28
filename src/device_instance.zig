@@ -254,6 +254,15 @@ const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const mapping = @import("config/mapping.zig");
 const device_mod = @import("config/device.zig");
 
+fn waitRunning(loop: *const EventLoop) !void {
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        if (@atomicLoad(bool, &loop.running, .acquire)) return;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+    return error.Timeout;
+}
+
 /// Minimal DeviceInstance for L0 tests: pre-wired mock device, null output.
 fn testInstance(
     allocator: std.mem.Allocator,
@@ -326,7 +335,7 @@ test "DeviceInstance: stop() causes run() to exit" {
         }
     };
     const thread = try std.Thread.spawn(.{}, T.runFn, .{&inst});
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    try waitRunning(&inst.loop);
     inst.stop();
     thread.join();
 
@@ -383,9 +392,14 @@ test "DeviceInstance: updateMapping sets pending_mapping and wakes run()" {
     };
     const thread = try std.Thread.spawn(.{}, T.runFn, .{&inst});
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    try waitRunning(&inst.loop);
     inst.updateMapping(&new_cfg);
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    // poll until pending_mapping is consumed (applied on the next loop iteration)
+    var w: usize = 0;
+    while (w < 1000) : (w += 1) {
+        if (@atomicLoad(?*mapping.MappingConfig, &inst.pending_mapping, .acquire) == null) break;
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
     inst.stop();
     thread.join();
 
