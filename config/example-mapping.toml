@@ -1,0 +1,133 @@
+# padctl mapping configuration example
+# This file shows all available mapping options.
+# Copy to ~/.config/padctl/mappings/ and customize.
+#
+# Usage: padctl --mapping <path>
+
+name = "example"
+
+# --- Button remapping ---
+# Values: button name ("B", "mouse_left", "mouse_side"), KEY_* code,
+#         "disabled", or "macro:<name>" (macro must be defined below)
+[remap]
+M1 = "KEY_F13"           # back paddle → keyboard key
+M2 = "mouse_side"        # back paddle → mouse side button
+M3 = "disabled"          # disable button entirely
+M4 = "macro:dodge_roll"  # trigger macro (defined below)
+A = "B"                  # swap A and B
+
+# --- Gyroscope ---
+[gyro]
+mode = "mouse"           # "off" or "mouse"
+activate = "hold_RB"     # gyro active while holding RB (omit = always on)
+sensitivity = 15.0       # overall sensitivity multiplier
+deadzone = 50            # ignore motion below this threshold (raw units)
+smoothing = 0.3          # 0.0–1.0, higher = smoother but more latency
+curve = 1.0              # response curve exponent (1.0 = linear)
+invert_x = false
+invert_y = false
+# sensitivity_x = 15.0  # override per-axis (overrides sensitivity)
+# sensitivity_y = 10.0
+# max_val = 32767.0      # clamp raw gyro value before scaling
+
+# --- Sticks ---
+[stick.left]
+mode = "gamepad"         # "gamepad", "mouse", or "scroll"
+deadzone = 128           # 0–32767
+# sensitivity = 1.0
+# suppress_gamepad = false  # suppress uinput gamepad events for this stick
+
+[stick.right]
+mode = "gamepad"
+deadzone = 128
+
+# --- D-pad ---
+[dpad]
+mode = "gamepad"         # "gamepad" or "arrows"
+# suppress_gamepad = false
+
+# --- Adaptive trigger (DualSense only) ---
+[adaptive_trigger]
+mode = "feedback"        # "off", "feedback", "weapon", or "vibration"
+
+[adaptive_trigger.left]
+position = 70            # trigger position (0–255) where effect starts
+strength = 200           # effect strength (0–255)
+# start = 30             # weapon mode: range start
+# end = 120              # weapon mode: range end
+# amplitude = 128        # vibration mode: amplitude
+# frequency = 10         # vibration mode: frequency (Hz)
+
+[adaptive_trigger.right]
+position = 40
+strength = 180
+
+# --- Layers (context-sensitive overrides) ---
+# Each [[layer]] block is an independent override set activated by a trigger.
+# Sections inside a layer (remap, gyro, stick_left, stick_right, dpad,
+# adaptive_trigger) replace the top-level config while the layer is active.
+
+[[layer]]
+name = "aim"
+trigger = "LT"           # button that activates this layer
+activation = "hold"      # "hold" = active while held, "toggle" = press to toggle
+hold_timeout = 200       # ms; if released before timeout, fires tap instead
+tap = "mouse_left"       # action fired on short-tap (requires hold_timeout)
+
+[layer.remap]
+RB = "mouse_left"        # RB becomes left click while aiming
+
+[layer.gyro]
+mode = "mouse"
+sensitivity = 2.0        # finer aim sensitivity while this layer is active
+
+[layer.stick_left]
+mode = "scroll"          # left stick scrolls while aiming
+
+[layer.stick_right]
+mode = "mouse"           # right stick becomes mouse pointer
+sensitivity = 1.5
+suppress_gamepad = true  # don't also send gamepad axis events
+
+[layer.dpad]
+mode = "arrows"          # dpad sends arrow keys while aiming
+suppress_gamepad = true
+
+[layer.adaptive_trigger]
+mode = "weapon"
+
+[layer.adaptive_trigger.left]
+start = 30
+end = 120
+strength = 200
+
+[[layer]]
+name = "fn"
+trigger = "Select"
+activation = "toggle"    # press Select to enter/exit fn layer
+
+[layer.remap]
+A = "KEY_F1"
+B = "KEY_F2"
+X = "KEY_F3"
+Y = "KEY_F4"
+
+# --- Macros ---
+# steps: sequence of { tap }, { down }, { up }, { delay } objects, or the
+#        bare string "pause_for_release" (holds until trigger button released)
+
+[[macro]]
+name = "dodge_roll"
+steps = [
+    { tap = "B" },
+    { delay = 50 },
+    { tap = "LEFT" },
+]
+
+[[macro]]
+name = "shift_hold"
+steps = [
+    { down = "KEY_LEFTSHIFT" },
+    "pause_for_release",
+    { up = "KEY_LEFTSHIFT" },
+]
