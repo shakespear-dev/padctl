@@ -9,7 +9,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\
         \\[Service]
         \\Type=simple
-        \\ExecStart={s}/bin/padctl --config-dir {s}/share/padctl/devices/
+        \\ExecStart={s}/bin/padctl
         \\Restart=on-failure
         \\RestartSec=3
         \\ProtectSystem=strict
@@ -23,7 +23,7 @@ fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) ![]c
         \\[Install]
         \\WantedBy=multi-user.target
         \\
-    , .{ prefix, prefix });
+    , .{prefix});
 }
 
 pub const InstallOptions = struct {

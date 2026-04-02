@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const paths = @import("../../config/paths.zig");
 const scan_mod = @import("../scan.zig");
+const mapping = @import("../../config/mapping.zig");
 
 const presets = [_][]const u8{ "xbox-360", "xbox-elite2", "dualsense", "switch-pro" };
 const templates = [_][]const u8{ "default", "fps", "racing", "fighting" };
@@ -191,19 +192,13 @@ pub fn run(allocator: std.mem.Allocator, device_arg: ?[]const u8, preset_arg: ?[
 
     print(allocator, &pbuf, "\nCreated: {s}\n", .{out_path});
 
-    // Validate
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "/proc/self/exe", "--validate", out_path },
-    }) catch null;
-    if (result) |res| {
-        defer allocator.free(res.stdout);
-        defer allocator.free(res.stderr);
-        if (res.term == .Exited and res.term.Exited == 0) {
-            print(allocator, &pbuf, "Validation: OK\n", .{});
-        } else {
-            print(allocator, &pbuf, "Validation warning: {s}\n", .{res.stderr});
-        }
+    // Validate as mapping config
+    const parsed = mapping.parseFile(allocator, out_path);
+    if (parsed) |res| {
+        res.deinit();
+        print(allocator, &pbuf, "Validation: OK\n", .{});
+    } else |err| {
+        print(allocator, &pbuf, "Validation warning: {}\n", .{err});
     }
 }
 
