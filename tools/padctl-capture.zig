@@ -177,17 +177,17 @@ fn parseHexBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
 
 /// Send bytes (zero-padded to report_size) and wait for a response matching prefix.
 fn sendAndAwaitPrefix(fd: posix.fd_t, bytes: []const u8, report_size: usize, prefix: []const u8) !void {
-    var pad_buf: [64]u8 = .{0} ** 64;
-    const send_len = @min(@max(bytes.len, report_size), pad_buf.len);
-    const copy_len = @min(bytes.len, pad_buf.len);
-    @memcpy(pad_buf[0..copy_len], bytes[0..copy_len]);
-    _ = try posix.write(fd, pad_buf[0..send_len]);
+    var pad_buf: [256]u8 = .{0} ** 256;
+    const target_len = @max(bytes.len, report_size);
+    if (target_len > pad_buf.len) return error.InitCommandTooLong;
+    @memcpy(pad_buf[0..bytes.len], bytes);
+    _ = try posix.write(fd, pad_buf[0..target_len]);
 
     if (prefix.len == 0) {
         std.Thread.sleep(20 * std.time.ns_per_ms);
         return;
     }
-    var read_buf: [64]u8 = undefined;
+    var read_buf: [256]u8 = undefined;
     var attempt: u8 = 0;
     while (attempt < 50) : (attempt += 1) {
         var pfds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
@@ -219,7 +219,8 @@ fn runInitFromConfig(allocator: std.mem.Allocator, fd: posix.fd_t, config_path: 
 
     const prefix = blk: {
         var buf = try allocator.alloc(u8, init_cfg.response_prefix.len);
-        for (init_cfg.response_prefix, 0..) |b, j| buf[j] = @intCast(b);
+        for (init_cfg.response_prefix, 0..) |b, j|
+            buf[j] = std.math.cast(u8, b) orelse return error.InvalidPrefix;
         break :blk buf;
     };
     defer allocator.free(prefix);
