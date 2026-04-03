@@ -971,8 +971,10 @@ pub const Supervisor = struct {
             }
 
             if (paths.len == 0) {
-                cfg_ptr.deinit();
-                self.allocator.destroy(cfg_ptr);
+                std.log.debug("config loaded for {s} (VID={x:0>4} PID={x:0>4}), no device online", .{
+                    cfg_ptr.value.device.name, vid, pid,
+                });
+                try self.configs.append(self.allocator, cfg_ptr);
                 continue;
             }
 
@@ -1050,11 +1052,11 @@ pub const Supervisor = struct {
                 spawned += 1;
             }
 
-            if (spawned > 0) {
-                try self.configs.append(self.allocator, cfg_ptr);
-            } else {
-                cfg_ptr.deinit();
-                self.allocator.destroy(cfg_ptr);
+            try self.configs.append(self.allocator, cfg_ptr);
+            if (spawned == 0) {
+                std.log.debug("config loaded for {s} (VID={x:0>4} PID={x:0>4}), no device online", .{
+                    cfg_ptr.value.device.name, vid, pid,
+                });
             }
         }
     }
@@ -1820,6 +1822,25 @@ test "supervisor: Supervisor: two toml files, no matching hidraw → zero instan
 
     try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+}
+
+test "supervisor: hotplug: config retained when no device online, attach finds it" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "a.toml", .data = minimal_device_toml });
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    // No device online at startup — config must still be retained for hotplug.
+    try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
 }
 
 test "supervisor: Supervisor: duplicate attach devname — only one instance created" {
