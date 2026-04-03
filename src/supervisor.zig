@@ -1065,7 +1065,11 @@ pub const Supervisor = struct {
 
     pub fn startFromDirs(self: *Supervisor, dirs: []const []const u8) void {
         for (dirs) |dir| {
-            std.fs.accessAbsolute(dir, .{}) catch continue;
+            std.fs.accessAbsolute(dir, .{}) catch |err| {
+                std.log.warn("skipping config dir '{s}': {}", .{ dir, err });
+                continue;
+            };
+            std.log.info("scanning config dir '{s}'", .{dir});
             self.startFromDir(dir) catch |err| {
                 std.log.warn("failed to scan config dir '{s}': {}", .{ dir, err });
             };
