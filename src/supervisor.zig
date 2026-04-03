@@ -16,6 +16,7 @@ const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
 const mapping_discovery = @import("config/mapping_discovery.zig");
+const user_config_mod = @import("config/user_config.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
@@ -141,6 +142,7 @@ pub const Supervisor = struct {
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
+    user_cfg: ?user_config_mod.ParseResult = null,
     test_switch_mapping_override: ?[]const u8 = null,
     test_switch_fail_commit_index: ?usize = null,
 
@@ -185,6 +187,7 @@ pub const Supervisor = struct {
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = sock,
+            .user_cfg = user_config_mod.load(allocator),
             .test_switch_mapping_override = null,
             .test_switch_fail_commit_index = null,
         };
@@ -214,6 +217,7 @@ pub const Supervisor = struct {
 
     pub fn deinit(self: *Supervisor) void {
         if (self.ctrl_sock) |*cs| cs.deinit();
+        if (self.user_cfg) |*uc| uc.deinit();
         if (self.test_switch_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
@@ -261,6 +265,7 @@ pub const Supervisor = struct {
 
         for (self.managed.items, 0..) |*m, i| {
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
+                std.log.info("device detached: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
                 m.instance.stop();
                 m.thread.join();
                 self.teardownManaged(m);
@@ -432,6 +437,9 @@ pub const Supervisor = struct {
         reload_allocator: std.mem.Allocator,
         initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
     ) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
+
         const new_configs = reloadFn(reload_allocator) catch |err| {
             std.log.err("reload failed: {}", .{err});
             return;
@@ -507,6 +515,9 @@ pub const Supervisor = struct {
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
+                m.instance.rebuildAuxIfChanged(map_copy, old_mapping_cfg) catch |err| {
+                    std.log.warn("rebuildAuxIfChanged: {}", .{err});
+                };
                 restartManagedThread(m) catch |err| {
                     m.instance.mapper = old_mapper;
                     m.instance.mapping_cfg = old_mapping_cfg;
@@ -535,7 +546,9 @@ pub const Supervisor = struct {
 
     fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
         switch (action) {
-            .add => self.attach(devname) catch {},
+            .add => self.attach(devname) catch |err| {
+                std.log.warn("hotplug attach {s}: {}", .{ devname, err });
+            },
             .remove => self.detach(devname),
             .other => {},
         }
@@ -694,9 +707,13 @@ pub const Supervisor = struct {
         m.instance.stop();
         m.thread.join();
         self.clearSwitchMapping(m);
+        const old_mcfg = m.instance.mapping_cfg;
         if (m.instance.mapper) |*old| old.deinit();
         m.instance.mapper = new_mapper;
         m.instance.mapping_cfg = &parsed_ptr.value;
+        m.instance.rebuildAuxIfChanged(&parsed_ptr.value, old_mcfg) catch |err| {
+            std.log.warn("rebuildAuxIfChanged: {}", .{err});
+        };
         restartManagedThread(m) catch |err| {
             if (m.instance.mapper) |*mapper| {
                 mapper.deinit();
@@ -802,6 +819,8 @@ pub const Supervisor = struct {
             };
         }
 
+        std.log.info("mapping switched: \"{s}\" ({d} device(s))", .{ name, targets.items.len });
+
         var resp_buf: [128]u8 = undefined;
         if (device_id) |dev_id| {
             const resp = std.fmt.bufPrint(&resp_buf, "OK {s} {s}\n", .{ name, dev_id }) catch {
@@ -879,6 +898,22 @@ pub const Supervisor = struct {
         resp_buf[pos] = '\n';
         pos += 1;
         cs.sendResponse(fd, resp_buf[0..pos]);
+    }
+
+    /// Look up the user config's default_mapping for device_name, find and parse the mapping file.
+    /// Caller owns the returned ParseResult (call deinit on it). Returns null if none configured.
+    fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?mapping_cfg.ParseResult {
+        const ucfg = &(self.user_cfg orelse return null);
+        const mapping_name = user_config_mod.findDefaultMapping(ucfg, device_name) orelse return null;
+        const path = mapping_discovery.findMapping(self.allocator, mapping_name) catch return null;
+        if (path == null) {
+            std.log.warn("mapping file \"{s}\" not found in XDG paths", .{mapping_name});
+            return null;
+        }
+        defer self.allocator.free(path.?);
+        const result = mapping_cfg.parseFile(self.allocator, path.?) catch return null;
+        std.log.info("mapping discovery: device \"{s}\" mapping \"{s}\" from \"{s}\"", .{ device_name, mapping_name, path.? });
+        return result;
     }
 
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
@@ -971,8 +1006,12 @@ pub const Supervisor = struct {
                 }
                 // seen now owns phys bytes via the key slot
 
+                var default_pr = self.loadUserDefaultMapping(cfg_ptr.value.device.name);
+                defer if (default_pr) |*pr| pr.deinit();
+                const init_mapping: ?*const MappingConfig = if (default_pr) |*pr| &pr.value else null;
+
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
                     // reclaim phys from seen
@@ -1280,9 +1319,13 @@ pub const Supervisor = struct {
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
+        var default_pr = self.loadUserDefaultMapping(cfg.?.device.name);
+        defer if (default_pr) |*pr| pr.deinit();
+        const init_mapping: ?*const MappingConfig = if (default_pr) |*pr| &pr.value else null;
+
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
             return;
@@ -1292,6 +1335,7 @@ pub const Supervisor = struct {
             self.allocator.destroy(inst_ptr);
             return err;
         };
+        std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
     }
 };
 
