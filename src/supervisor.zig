@@ -129,6 +129,12 @@ fn threadEntry(inst: *DeviceInstance) void {
     };
 }
 
+const HotplugPending = struct {
+    devname: [64]u8,
+    len: u8,
+    retries: u8,
+};
+
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     managed: std.ArrayList(ManagedInstance),
@@ -137,6 +143,8 @@ pub const Supervisor = struct {
     netlink_fd: posix.fd_t,
     inotify_fd: posix.fd_t,
     debounce_fd: posix.fd_t,
+    hotplug_retry_fd: posix.fd_t,
+    hotplug_pending: std.ArrayList(HotplugPending),
     config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
@@ -167,6 +175,12 @@ pub const Supervisor = struct {
         };
         errdefer if (nl_fd >= 0) posix.close(nl_fd);
 
+        const retry_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch blk: {
+            std.log.warn("hotplug retry timer unavailable", .{});
+            break :blk -1;
+        };
+        errdefer if (retry_fd >= 0) posix.close(retry_fd);
+
         const inotify_result = initInotify(allocator);
 
         var sock_path_buf: [256]u8 = undefined;
@@ -184,6 +198,8 @@ pub const Supervisor = struct {
             .netlink_fd = nl_fd,
             .inotify_fd = inotify_result.inotify_fd,
             .debounce_fd = inotify_result.debounce_fd,
+            .hotplug_retry_fd = retry_fd,
+            .hotplug_pending = .{},
             .config_dir = inotify_result.config_dir,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
@@ -207,6 +223,8 @@ pub const Supervisor = struct {
             .netlink_fd = -1,
             .inotify_fd = -1,
             .debounce_fd = -1,
+            .hotplug_retry_fd = -1,
+            .hotplug_pending = .{},
             .config_dir = null,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
@@ -225,6 +243,8 @@ pub const Supervisor = struct {
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
         if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
+        if (self.hotplug_retry_fd >= 0) posix.close(self.hotplug_retry_fd);
+        self.hotplug_pending.deinit(self.allocator);
         if (self.config_dir) |dir| self.allocator.free(dir);
         if (self.managed.items.len > 0) self.stopAll();
         self.managed.deinit(self.allocator);
@@ -554,7 +574,11 @@ pub const Supervisor = struct {
     fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
         switch (action) {
             .add => self.attach(devname) catch |err| {
-                std.log.warn("hotplug attach {s}: {}", .{ devname, err });
+                if (err == error.AccessDenied) {
+                    self.enqueueHotplugRetry(devname);
+                } else {
+                    std.log.warn("hotplug attach {s}: {}", .{ devname, err });
+                }
             },
             .remove => self.detach(devname),
             .other => {},
@@ -573,6 +597,50 @@ pub const Supervisor = struct {
             .it_interval = .{ .sec = 0, .nsec = 0 },
         };
         _ = linux.timerfd_settime(self.debounce_fd, .{}, &spec, null);
+    }
+
+    fn enqueueHotplugRetry(self: *Supervisor, devname: []const u8) void {
+        if (self.hotplug_retry_fd < 0) return;
+        var entry: HotplugPending = undefined;
+        const n = @min(devname.len, entry.devname.len);
+        @memcpy(entry.devname[0..n], devname[0..n]);
+        entry.len = @intCast(n);
+        entry.retries = 0;
+        self.hotplug_pending.append(self.allocator, entry) catch return;
+        const spec = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = 300_000_000 },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+        _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+    }
+
+    fn drainHotplugRetry(self: *Supervisor) void {
+        if (self.hotplug_retry_fd < 0) return;
+        var tbuf: [8]u8 = undefined;
+        _ = posix.read(self.hotplug_retry_fd, &tbuf) catch {};
+        var i: usize = 0;
+        while (i < self.hotplug_pending.items.len) {
+            const p = &self.hotplug_pending.items[i];
+            const name = p.devname[0..p.len];
+            self.attach(name) catch {
+                p.retries += 1;
+                if (p.retries >= 3) {
+                    std.log.warn("hotplug: giving up on {s} after 3 retries", .{name});
+                    _ = self.hotplug_pending.swapRemove(i);
+                } else {
+                    i += 1;
+                }
+                continue;
+            };
+            _ = self.hotplug_pending.swapRemove(i);
+        }
+        if (self.hotplug_pending.items.len > 0) {
+            const spec = linux.itimerspec{
+                .it_value = .{ .sec = 0, .nsec = 300_000_000 },
+                .it_interval = .{ .sec = 0, .nsec = 0 },
+            };
+            _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+        }
     }
 
     fn drainInotify(self: *Supervisor) void {
@@ -598,8 +666,8 @@ pub const Supervisor = struct {
         }
         defer self.stopAll();
 
-        // 5 base fds + 1 listen + 4 clients = 10
-        var pollfds: [10]posix.pollfd = undefined;
+        // 6 base fds + 1 listen + 4 clients = 11
+        var pollfds: [11]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -617,6 +685,12 @@ pub const Supervisor = struct {
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -672,6 +746,13 @@ pub const Supervisor = struct {
                     var tbuf: [8]u8 = undefined;
                     _ = posix.read(self.debounce_fd, &tbuf) catch {};
                     self.doReload(reloadFn, reload_allocator, initFn);
+                    pollfds[slot].revents = 0;
+                }
+            }
+
+            if (hotplug_retry_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainHotplugRetry();
                     pollfds[slot].revents = 0;
                 }
             }
@@ -1122,7 +1203,7 @@ pub const Supervisor = struct {
     pub fn serveMulti(self: *Supervisor, dirs: []const []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [10]posix.pollfd = undefined;
+        var pollfds: [11]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1140,6 +1221,12 @@ pub const Supervisor = struct {
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -1198,6 +1285,13 @@ pub const Supervisor = struct {
                 }
             }
 
+            if (hotplug_retry_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
             if (listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
@@ -1223,7 +1317,7 @@ pub const Supervisor = struct {
     pub fn serve(self: *Supervisor, dir_path: []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [10]posix.pollfd = undefined;
+        var pollfds: [11]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1241,6 +1335,12 @@ pub const Supervisor = struct {
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -1299,6 +1399,13 @@ pub const Supervisor = struct {
                 }
             }
 
+            if (hotplug_retry_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
             if (listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
@@ -1326,7 +1433,13 @@ pub const Supervisor = struct {
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
 
-        const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch return;
+        const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
+            if (err == error.AccessDenied) {
+                std.log.warn("hotplug: {s} not ready (EACCES)", .{path});
+                return error.AccessDenied;
+            }
+            return;
+        };
         defer posix.close(fd);
 
         var info: ioctl.HidrawDevinfo = undefined;
