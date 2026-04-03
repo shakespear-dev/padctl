@@ -54,6 +54,7 @@ pub const Mapper = struct {
     active_macros: std.ArrayList(MacroPlayer),
     timer_queue: TimerQueue,
     next_token: u32,
+    warned_unknown_remap: bool,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
         return .{
@@ -72,6 +73,7 @@ pub const Mapper = struct {
             .active_macros = .{},
             .timer_queue = TimerQueue.init(allocator, timer_fd),
             .next_token = 1,
+            .warned_unknown_remap = false,
         };
     }
 
@@ -106,6 +108,9 @@ pub const Mapper = struct {
             self.gyro_proc.reset();
             self.stick_left.reset();
             self.stick_right.reset();
+            // Reset dpad prev so edge detection fires on the next frame.
+            self.prev.dpad_x = 0;
+            self.prev.dpad_y = 0;
             // Cancel in-flight macros; emit releases for any held keys.
             for (self.active_macros.items) |*p| p.emitPendingReleases(&aux);
             self.active_macros.clearRetainingCapacity();
@@ -194,13 +199,13 @@ pub const Mapper = struct {
 
         // [4] base remap: collect suppress mask + per-source inject targets
         if (self.config.remap) |remap_map| {
-            collectRemapMap(remap_map, &self.suppressed_buttons, &per_src_inject);
+            collectRemapMap(remap_map, &self.suppressed_buttons, &per_src_inject, &self.warned_unknown_remap);
         }
 
         // [5] layer remap: OR-accumulate suppress, last-write-wins for inject
         if (self.layer.getActive(configs)) |active| {
             if (active.remap) |layer_remap| {
-                collectRemapMap(layer_remap, &self.suppressed_buttons, &per_src_inject);
+                collectRemapMap(layer_remap, &self.suppressed_buttons, &per_src_inject, &self.warned_unknown_remap);
             }
         }
 
@@ -233,7 +238,9 @@ pub const Mapper = struct {
                             const token = self.next_token;
                             self.next_token +%= 1;
                             const player = MacroPlayer.init(m, token);
-                            self.active_macros.append(self.allocator, player) catch {};
+                            self.active_macros.append(self.allocator, player) catch |err| {
+                                std.log.warn("macro queue failed: {}", .{err});
+                            };
                         }
                     }
                 },
@@ -248,7 +255,10 @@ pub const Mapper = struct {
         // [8] resume all active macro players; remove finished ones
         var i: usize = 0;
         while (i < self.active_macros.items.len) {
-            const done = self.active_macros.items[i].step(&aux, &self.timer_queue) catch false;
+            const done = self.active_macros.items[i].step(&aux, &self.timer_queue) catch |err| blk: {
+                std.log.warn("macro step failed: {}", .{err});
+                break :blk false;
+            };
             if (done) {
                 _ = self.active_macros.swapRemove(i);
             } else {
@@ -298,7 +308,11 @@ pub const Mapper = struct {
     }
 
     pub fn onTimerExpired(self: *Mapper) AuxEventList {
-        _ = self.layer.onTimerExpired();
+        const th_res = self.layer.onTimerExpired();
+        if (th_res.layer_activated) {
+            self.prev.dpad_x = 0;
+            self.prev.dpad_y = 0;
+        }
 
         var aux = AuxEventList{};
         var buf: [16]timer_queue_mod.Deadline = undefined;
@@ -307,7 +321,10 @@ pub const Mapper = struct {
             var idx: usize = 0;
             while (idx < self.active_macros.items.len) {
                 if (self.active_macros.items[idx].timer_token == d.token) {
-                    const done = self.active_macros.items[idx].step(&aux, &self.timer_queue) catch false;
+                    const done = self.active_macros.items[idx].step(&aux, &self.timer_queue) catch |err| blk: {
+                        std.log.warn("macro step failed: {}", .{err});
+                        break :blk false;
+                    };
                     if (done) {
                         _ = self.active_macros.swapRemove(idx);
                     } else {
@@ -397,13 +414,26 @@ fn collectRemapMap(
     remap_map: toml.HashMap([]const u8),
     suppressed: *u64,
     per_src_inject: []?RemapTargetResolved,
+    warned: *bool,
 ) void {
     var it = remap_map.map.iterator();
     while (it.next()) |entry| {
-        const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse continue;
+        const src_id = std.meta.stringToEnum(ButtonId, entry.key_ptr.*) orelse {
+            if (!warned.*) {
+                std.log.warn("unknown remap source: {s}", .{entry.key_ptr.*});
+                warned.* = true;
+            }
+            continue;
+        };
         const src_idx: u6 = @intCast(@intFromEnum(src_id));
+        const target = resolveTarget(entry.value_ptr.*) catch {
+            if (!warned.*) {
+                std.log.warn("unknown remap target: {s}", .{entry.value_ptr.*});
+                warned.* = true;
+            }
+            continue;
+        };
         suppressed.* |= @as(u64, 1) << src_idx;
-        const target = resolveTarget(entry.value_ptr.*) catch continue;
         per_src_inject[@intCast(src_idx)] = target;
     }
 }
@@ -757,6 +787,51 @@ test "mapper: layer dpad override: active layer dpad config used" {
     const dcfg = m.effectiveDpadConfig();
     try testing.expectEqualStrings("arrows", dcfg.mode);
     try testing.expectEqual(@as(?bool, true), dcfg.suppress_gamepad);
+}
+
+test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
+    // Regression: when a hold-layer activates via timer (PENDING→ACTIVE), self.prev.dpad_x/y
+    // retains the pressed value. Without the prev reset, processDpad sees curr==prev and
+    // emits no edge. Fix: reset prev.dpad_x/y on active_changed.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "nav"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.dpad]
+        \\mode = "arrows"
+        \\suppress_gamepad = true
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+
+    // Frame 1: LT + dpad-up pressed simultaneously → layer PENDING, dpad recorded in prev
+    _ = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16);
+
+    // Timer fires: PENDING → ACTIVE
+    _ = m.onTimerExpired();
+
+    // Frame 2: still holding LT + dpad-up, but now layer is ACTIVE (active_changed=true)
+    // prev.dpad_y should be reset to 0 so edge triggers KEY_UP press
+    const configs = parsed.value.layer.?;
+    _ = configs; // suppress unused warning
+    const ev = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16);
+
+    var got_key_up = false;
+    for (ev.aux.slice()) |e| switch (e) {
+        .key => |k| if (k.code == c.KEY_UP and k.pressed) {
+            got_key_up = true;
+        },
+        else => {},
+    };
+    try testing.expect(got_key_up);
 }
 
 test "mapper: gamepad_button tap: injected this frame, released next frame" {
@@ -1253,10 +1328,11 @@ test "mapper: stick scroll REL_WHEEL and REL_HWHEEL codes verified" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
+    // ry < 0 = stick up → REL_WHEEL > 0 (scroll up); rx > 0 → REL_HWHEEL > 0
     var wheel_value: i32 = 0;
     var hwheel_value: i32 = 0;
     for (0..30) |_| {
-        const ev = try m.apply(.{ .rx = 32000, .ry = 32000 }, 16);
+        const ev = try m.apply(.{ .rx = 32000, .ry = -32000 }, 16);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| {
                 if (r.code == REL_WHEEL) wheel_value += r.value;
@@ -1270,7 +1346,7 @@ test "mapper: stick scroll REL_WHEEL and REL_HWHEEL codes verified" {
     try testing.expect(hwheel_value > 0);
 }
 
-test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
+test "mapper: stick scroll positive ry gives negative REL_WHEEL values" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[stick.right]
@@ -1282,9 +1358,10 @@ test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
+    // ry > 0 = stick down → REL_WHEEL < 0 (scroll down)
     var wheel_value: i32 = 0;
     for (0..30) |_| {
-        const ev = try m.apply(.{ .rx = 0, .ry = -32000 }, 16);
+        const ev = try m.apply(.{ .rx = 0, .ry = 32000 }, 16);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| if (r.code == REL_WHEEL) {
                 wheel_value += r.value;
@@ -1294,4 +1371,21 @@ test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
     }
 
     try testing.expect(wheel_value < 0);
+}
+
+test "mapper: invalid remap target does not suppress source button" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = "INVALID_TARGET_XYZ"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16);
+    // A must still pass through — bad target must not suppress the source
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << a_idx)) != 0);
 }

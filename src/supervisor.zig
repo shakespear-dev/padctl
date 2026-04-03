@@ -16,6 +16,7 @@ const netlink = @import("io/netlink.zig");
 const ioctl = @import("io/ioctl_constants.zig");
 const config_paths = @import("config/paths.zig");
 const mapping_discovery = @import("config/mapping_discovery.zig");
+const user_config_mod = @import("config/user_config.zig");
 const ControlSocket = @import("io/control_socket.zig").ControlSocket;
 const control_socket = @import("io/control_socket.zig");
 
@@ -29,6 +30,7 @@ pub const ManagedInstance = struct {
     thread: std.Thread,
     mapping_arena: std.heap.ArenaAllocator,
     switch_mapping: ?*mapping_cfg.ParseResult = null,
+    default_mapping_pr: ?*mapping_cfg.ParseResult = null,
 };
 
 /// Config snapshot used for hot-reload diffing.
@@ -127,6 +129,12 @@ fn threadEntry(inst: *DeviceInstance) void {
     };
 }
 
+const HotplugPending = struct {
+    devname: [64]u8,
+    len: u8,
+    retries: u8,
+};
+
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
     managed: std.ArrayList(ManagedInstance),
@@ -135,12 +143,15 @@ pub const Supervisor = struct {
     netlink_fd: posix.fd_t,
     inotify_fd: posix.fd_t,
     debounce_fd: posix.fd_t,
+    hotplug_retry_fd: posix.fd_t,
+    hotplug_pending: std.ArrayList(HotplugPending),
     config_dir: ?[]const u8,
     // ParseResults whose DeviceConfig is referenced by at least one managed instance.
     configs: std.ArrayList(*config_device.ParseResult),
     // devname → phys_key (both slices owned by this map)
     devname_map: std.StringHashMap([]const u8),
     ctrl_sock: ?ControlSocket,
+    user_cfg: ?user_config_mod.ParseResult = null,
     test_switch_mapping_override: ?[]const u8 = null,
     test_switch_fail_commit_index: ?usize = null,
 
@@ -164,6 +175,12 @@ pub const Supervisor = struct {
         };
         errdefer if (nl_fd >= 0) posix.close(nl_fd);
 
+        const retry_fd = posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true }) catch blk: {
+            std.log.warn("hotplug retry timer unavailable", .{});
+            break :blk -1;
+        };
+        errdefer if (retry_fd >= 0) posix.close(retry_fd);
+
         const inotify_result = initInotify(allocator);
 
         var sock_path_buf: [256]u8 = undefined;
@@ -181,10 +198,13 @@ pub const Supervisor = struct {
             .netlink_fd = nl_fd,
             .inotify_fd = inotify_result.inotify_fd,
             .debounce_fd = inotify_result.debounce_fd,
+            .hotplug_retry_fd = retry_fd,
+            .hotplug_pending = .{},
             .config_dir = inotify_result.config_dir,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
             .ctrl_sock = sock,
+            .user_cfg = user_config_mod.load(allocator),
             .test_switch_mapping_override = null,
             .test_switch_fail_commit_index = null,
         };
@@ -203,6 +223,8 @@ pub const Supervisor = struct {
             .netlink_fd = -1,
             .inotify_fd = -1,
             .debounce_fd = -1,
+            .hotplug_retry_fd = -1,
+            .hotplug_pending = .{},
             .config_dir = null,
             .configs = .{},
             .devname_map = std.StringHashMap([]const u8).init(allocator),
@@ -214,12 +236,15 @@ pub const Supervisor = struct {
 
     pub fn deinit(self: *Supervisor) void {
         if (self.ctrl_sock) |*cs| cs.deinit();
+        if (self.user_cfg) |*uc| uc.deinit();
         if (self.test_switch_mapping_override) |p| self.allocator.free(p);
         posix.close(self.stop_fd);
         posix.close(self.hup_fd);
         if (self.netlink_fd >= 0) posix.close(self.netlink_fd);
         if (self.inotify_fd >= 0) posix.close(self.inotify_fd);
         if (self.debounce_fd >= 0) posix.close(self.debounce_fd);
+        if (self.hotplug_retry_fd >= 0) posix.close(self.hotplug_retry_fd);
+        self.hotplug_pending.deinit(self.allocator);
         if (self.config_dir) |dir| self.allocator.free(dir);
         if (self.managed.items.len > 0) self.stopAll();
         self.managed.deinit(self.allocator);
@@ -238,8 +263,12 @@ pub const Supervisor = struct {
 
     /// Attach a pre-constructed instance under a given devname / phys_key.
     /// Returns without error if devname already tracked (dedup guard).
-    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance) !void {
+    /// Ownership of default_pr (if non-null) transfers to ManagedInstance.
+    pub fn attachWithInstance(self: *Supervisor, devname: []const u8, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         if (self.devname_map.contains(devname)) return;
+        for (self.managed.items) |m| {
+            if (std.mem.eql(u8, m.phys_key, phys_key)) return;
+        }
         const dev_copy = try self.allocator.dupe(u8, devname);
         errdefer self.allocator.free(dev_copy);
         const phys_copy = try self.allocator.dupe(u8, phys_key);
@@ -248,29 +277,38 @@ pub const Supervisor = struct {
         errdefer self.allocator.free(dn_copy);
         try self.devname_map.put(dev_copy, phys_copy);
         errdefer _ = self.devname_map.fetchRemove(dev_copy);
-        try self.spawnInstance(phys_key, instance);
+        try self.spawnInstance(phys_key, instance, default_pr);
         self.managed.items[self.managed.items.len - 1].devname = dn_copy;
     }
 
     /// Stop and free the instance attached under devname. No-op if not found.
     pub fn detach(self: *Supervisor, devname: []const u8) void {
-        const entry = self.devname_map.fetchRemove(devname) orelse return;
+        const entry = self.devname_map.fetchRemove(devname) orelse {
+            std.log.debug("detach: {s} not in devname_map", .{devname});
+            return;
+        };
         self.allocator.free(entry.key);
         const phys_key = entry.value;
         defer self.allocator.free(phys_key);
 
-        for (self.managed.items, 0..) |*m, i| {
+        var i: usize = self.managed.items.len;
+        var found = false;
+        while (i > 0) {
+            i -= 1;
+            const m = &self.managed.items[i];
             if (std.mem.eql(u8, m.phys_key, phys_key)) {
+                std.log.info("device detached: \"{s}\" {s}", .{ m.instance.device_cfg.device.name, devname });
                 m.instance.stop();
                 m.thread.join();
                 self.teardownManaged(m);
                 _ = self.managed.swapRemove(i);
-                return;
+                found = true;
             }
         }
+        if (!found) std.log.debug("detach: no managed instance for phys {s}", .{phys_key});
     }
 
-    fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance) !void {
+    fn spawnInstance(self: *Supervisor, phys_key: []const u8, instance: *DeviceInstance, default_pr: ?*mapping_cfg.ParseResult) !void {
         const thread = try std.Thread.spawn(.{}, threadEntry, .{instance});
         errdefer {
             instance.stop();
@@ -285,11 +323,16 @@ pub const Supervisor = struct {
             .thread = thread,
             .mapping_arena = std.heap.ArenaAllocator.init(self.allocator),
             .switch_mapping = null,
+            .default_mapping_pr = default_pr,
         });
     }
 
     fn teardownManaged(self: *Supervisor, m: *ManagedInstance) void {
         if (m.switch_mapping) |pm| {
+            pm.deinit();
+            self.allocator.destroy(pm);
+        }
+        if (m.default_mapping_pr) |pm| {
             pm.deinit();
             self.allocator.destroy(pm);
         }
@@ -432,6 +475,9 @@ pub const Supervisor = struct {
         reload_allocator: std.mem.Allocator,
         initFn: *const fn (allocator: std.mem.Allocator, entry: ConfigEntry) anyerror!*DeviceInstance,
     ) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
+
         const new_configs = reloadFn(reload_allocator) catch |err| {
             std.log.err("reload failed: {}", .{err});
             return;
@@ -487,7 +533,7 @@ pub const Supervisor = struct {
 
             if (found == null) {
                 const instance = try initFn(self.allocator, nc);
-                try self.spawnInstance(nc.phys_key, instance);
+                try self.spawnInstance(nc.phys_key, instance, null);
             } else if (nc.mapping_cfg) |new_map| {
                 const m = found.?;
                 // Stop-Swap-Restart: stop thread before touching arena
@@ -507,6 +553,9 @@ pub const Supervisor = struct {
                 var new_mapper = try Mapper.init(map_copy, m.instance.loop.timer_fd, self.allocator);
                 m.instance.mapper = new_mapper;
                 m.instance.mapping_cfg = map_copy;
+                m.instance.rebuildAuxIfChanged(map_copy, old_mapping_cfg) catch |err| {
+                    std.log.warn("rebuildAuxIfChanged: {}", .{err});
+                };
                 restartManagedThread(m) catch |err| {
                     m.instance.mapper = old_mapper;
                     m.instance.mapping_cfg = old_mapping_cfg;
@@ -535,7 +584,13 @@ pub const Supervisor = struct {
 
     fn netlinkCallback(self: *Supervisor, action: netlink.UeventAction, devname: []const u8) void {
         switch (action) {
-            .add => self.attach(devname) catch {},
+            .add => self.attach(devname) catch |err| {
+                if (err == error.AccessDenied) {
+                    self.enqueueHotplugRetry(devname);
+                } else {
+                    std.log.warn("hotplug attach {s}: {}", .{ devname, err });
+                }
+            },
             .remove => self.detach(devname),
             .other => {},
         }
@@ -553,6 +608,55 @@ pub const Supervisor = struct {
             .it_interval = .{ .sec = 0, .nsec = 0 },
         };
         _ = linux.timerfd_settime(self.debounce_fd, .{}, &spec, null);
+    }
+
+    fn enqueueHotplugRetry(self: *Supervisor, devname: []const u8) void {
+        if (self.hotplug_retry_fd < 0) return;
+        var entry: HotplugPending = undefined;
+        const n = @min(devname.len, entry.devname.len);
+        @memcpy(entry.devname[0..n], devname[0..n]);
+        entry.len = @intCast(n);
+        entry.retries = 0;
+        self.hotplug_pending.append(self.allocator, entry) catch return;
+        const spec = linux.itimerspec{
+            .it_value = .{ .sec = 0, .nsec = 300_000_000 },
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+        };
+        _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+    }
+
+    fn drainHotplugRetry(self: *Supervisor) void {
+        if (self.hotplug_retry_fd < 0) return;
+        var tbuf: [8]u8 = undefined;
+        _ = posix.read(self.hotplug_retry_fd, &tbuf) catch {};
+        var i: usize = 0;
+        while (i < self.hotplug_pending.items.len) {
+            const p = &self.hotplug_pending.items[i];
+            const name = p.devname[0..p.len];
+            self.attach(name) catch |err| {
+                if (err != error.AccessDenied) {
+                    std.log.warn("hotplug retry {s}: {}, dropping", .{ name, err });
+                    _ = self.hotplug_pending.swapRemove(i);
+                    continue;
+                }
+                p.retries += 1;
+                if (p.retries >= 3) {
+                    std.log.warn("hotplug: giving up on {s} after 3 retries", .{name});
+                    _ = self.hotplug_pending.swapRemove(i);
+                } else {
+                    i += 1;
+                }
+                continue;
+            };
+            _ = self.hotplug_pending.swapRemove(i);
+        }
+        if (self.hotplug_pending.items.len > 0) {
+            const spec = linux.itimerspec{
+                .it_value = .{ .sec = 0, .nsec = 300_000_000 },
+                .it_interval = .{ .sec = 0, .nsec = 0 },
+            };
+            _ = linux.timerfd_settime(self.hotplug_retry_fd, .{}, &spec, null);
+        }
     }
 
     fn drainInotify(self: *Supervisor) void {
@@ -574,12 +678,12 @@ pub const Supervisor = struct {
     ) !void {
         for (initial_configs) |nc| {
             const instance = try initFn(self.allocator, nc);
-            try self.spawnInstance(nc.phys_key, instance);
+            try self.spawnInstance(nc.phys_key, instance, null);
         }
         defer self.stopAll();
 
-        // 5 base fds + 1 listen + 4 clients = 10
-        var pollfds: [10]posix.pollfd = undefined;
+        // 6 base fds + 1 listen + 4 clients = 11
+        var pollfds: [11]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -597,6 +701,12 @@ pub const Supervisor = struct {
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -656,6 +766,13 @@ pub const Supervisor = struct {
                 }
             }
 
+            if (hotplug_retry_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
             if (listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
@@ -694,9 +811,13 @@ pub const Supervisor = struct {
         m.instance.stop();
         m.thread.join();
         self.clearSwitchMapping(m);
+        const old_mcfg = m.instance.mapping_cfg;
         if (m.instance.mapper) |*old| old.deinit();
         m.instance.mapper = new_mapper;
         m.instance.mapping_cfg = &parsed_ptr.value;
+        m.instance.rebuildAuxIfChanged(&parsed_ptr.value, old_mcfg) catch |err| {
+            std.log.warn("rebuildAuxIfChanged: {}", .{err});
+        };
         restartManagedThread(m) catch |err| {
             if (m.instance.mapper) |*mapper| {
                 mapper.deinit();
@@ -802,6 +923,8 @@ pub const Supervisor = struct {
             };
         }
 
+        std.log.info("mapping switched: \"{s}\" ({d} device(s))", .{ name, targets.items.len });
+
         var resp_buf: [128]u8 = undefined;
         if (device_id) |dev_id| {
             const resp = std.fmt.bufPrint(&resp_buf, "OK {s} {s}\n", .{ name, dev_id }) catch {
@@ -881,6 +1004,22 @@ pub const Supervisor = struct {
         cs.sendResponse(fd, resp_buf[0..pos]);
     }
 
+    /// Look up the user config's default_mapping for device_name, find and parse the mapping file.
+    /// Caller owns the returned ParseResult (call deinit on it). Returns null if none configured.
+    fn loadUserDefaultMapping(self: *const Supervisor, device_name: []const u8) ?mapping_cfg.ParseResult {
+        const ucfg = &(self.user_cfg orelse return null);
+        const mapping_name = user_config_mod.findDefaultMapping(ucfg, device_name) orelse return null;
+        const path = mapping_discovery.findMapping(self.allocator, mapping_name) catch return null;
+        if (path == null) {
+            std.log.warn("mapping file \"{s}\" not found in XDG paths", .{mapping_name});
+            return null;
+        }
+        defer self.allocator.free(path.?);
+        const result = mapping_cfg.parseFile(self.allocator, path.?) catch return null;
+        std.log.info("mapping discovery: device \"{s}\" mapping \"{s}\" from \"{s}\"", .{ device_name, mapping_name, path.? });
+        return result;
+    }
+
     /// Glob *.toml in dir_path, discover devices by VID/PID, dedup by physical path, spawn threads.
     pub fn startFromDir(self: *Supervisor, dir_path: []const u8) !void {
         return self.startFromDirWithRoot(dir_path, "/dev");
@@ -929,8 +1068,10 @@ pub const Supervisor = struct {
             }
 
             if (paths.len == 0) {
-                cfg_ptr.deinit();
-                self.allocator.destroy(cfg_ptr);
+                std.log.debug("config loaded for {s} (VID={x:0>4} PID={x:0>4}), no device online", .{
+                    cfg_ptr.value.device.name, vid, pid,
+                });
+                try self.configs.append(self.allocator, cfg_ptr);
                 continue;
             }
 
@@ -971,32 +1112,68 @@ pub const Supervisor = struct {
                 }
                 // seen now owns phys bytes via the key slot
 
+                const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
+                    const pr = self.loadUserDefaultMapping(cfg_ptr.value.device.name) orelse break :blk null;
+                    const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
+                    p.* = pr;
+                    break :blk p;
+                };
+                const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
+
                 const inst_ptr = try self.allocator.create(DeviceInstance);
-                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value) catch |err| {
+                inst_ptr.* = DeviceInstance.init(self.allocator, &cfg_ptr.value, init_mapping) catch |err| {
                     std.log.warn("DeviceInstance.init for {s}: {}", .{ hidraw_path, err });
                     self.allocator.destroy(inst_ptr);
+                    if (default_pr_ptr) |p| {
+                        p.deinit();
+                        self.allocator.destroy(p);
+                    }
                     // reclaim phys from seen
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
                     continue;
                 };
-                self.spawnInstance(phys, inst_ptr) catch |err| {
+                self.spawnInstance(phys, inst_ptr, default_pr_ptr) catch |err| {
                     std.log.warn("spawnInstance for {s}: {}", .{ hidraw_path, err });
                     inst_ptr.deinit();
                     self.allocator.destroy(inst_ptr);
+                    if (default_pr_ptr) |p| {
+                        p.deinit();
+                        self.allocator.destroy(p);
+                    }
                     _ = seen.remove(phys);
                     self.allocator.free(phys);
                     continue;
                 };
+                // Register devname → phys in devname_map so detach() can find this instance.
+                // m.devname must be a separate allocation from the map key because
+                // teardownManaged frees both independently.
+                {
+                    const devname = std.fs.path.basename(hidraw_path);
+                    const dev_copy = self.allocator.dupe(u8, devname) catch null;
+                    const phys_copy = if (dev_copy != null) self.allocator.dupe(u8, phys) catch null else null;
+                    if (dev_copy != null and phys_copy != null) {
+                        if (self.devname_map.put(dev_copy.?, phys_copy.?)) {
+                            const dn_copy = self.allocator.dupe(u8, devname) catch null;
+                            self.managed.items[self.managed.items.len - 1].devname = dn_copy;
+                        } else |_| {
+                            self.allocator.free(dev_copy.?);
+                            self.allocator.free(phys_copy.?);
+                        }
+                    } else {
+                        if (dev_copy) |d| self.allocator.free(d);
+                        if (phys_copy) |p| self.allocator.free(p);
+                    }
+                }
                 // phys stays in seen (owned there) and also duped by spawnInstance for ManagedInstance.
                 spawned += 1;
             }
 
-            if (spawned > 0) {
-                try self.configs.append(self.allocator, cfg_ptr);
-            } else {
-                cfg_ptr.deinit();
-                self.allocator.destroy(cfg_ptr);
+            try self.configs.append(self.allocator, cfg_ptr);
+            if (spawned == 0) {
+                std.log.debug("config loaded for {s} (VID={x:0>4} PID={x:0>4}), no device online", .{
+                    cfg_ptr.value.device.name, vid, pid,
+                });
             }
         }
     }
@@ -1007,7 +1184,11 @@ pub const Supervisor = struct {
 
     pub fn startFromDirs(self: *Supervisor, dirs: []const []const u8) void {
         for (dirs) |dir| {
-            std.fs.accessAbsolute(dir, .{}) catch continue;
+            std.fs.accessAbsolute(dir, .{}) catch |err| {
+                std.log.warn("skipping config dir '{s}': {}", .{ dir, err });
+                continue;
+            };
+            std.log.info("scanning config dir '{s}'", .{dir});
             self.startFromDir(dir) catch |err| {
                 std.log.warn("failed to scan config dir '{s}': {}", .{ dir, err });
             };
@@ -1015,6 +1196,8 @@ pub const Supervisor = struct {
     }
 
     fn doReloadFromDir(self: *Supervisor, dir_path: []const u8) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
         self.stopAll();
         for (self.configs.items) |c| {
             c.deinit();
@@ -1033,6 +1216,8 @@ pub const Supervisor = struct {
     }
 
     fn doReloadFromDirs(self: *Supervisor, dirs: []const []const u8) void {
+        if (self.user_cfg) |*uc| uc.deinit();
+        self.user_cfg = user_config_mod.load(self.allocator);
         self.stopAll();
         for (self.configs.items) |c| {
             c.deinit();
@@ -1054,7 +1239,7 @@ pub const Supervisor = struct {
     pub fn serveMulti(self: *Supervisor, dirs: []const []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [10]posix.pollfd = undefined;
+        var pollfds: [11]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1072,6 +1257,12 @@ pub const Supervisor = struct {
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -1130,6 +1321,13 @@ pub const Supervisor = struct {
                 }
             }
 
+            if (hotplug_retry_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
             if (listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
@@ -1155,7 +1353,7 @@ pub const Supervisor = struct {
     pub fn serve(self: *Supervisor, dir_path: []const u8) void {
         defer self.stopAll();
 
-        var pollfds: [10]posix.pollfd = undefined;
+        var pollfds: [11]posix.pollfd = undefined;
         pollfds[0] = .{ .fd = self.stop_fd, .events = posix.POLL.IN, .revents = 0 };
         pollfds[1] = .{ .fd = self.hup_fd, .events = posix.POLL.IN, .revents = 0 };
         var base_nfds: usize = 2;
@@ -1173,6 +1371,12 @@ pub const Supervisor = struct {
         } else null;
         const debounce_slot: ?usize = if (self.debounce_fd >= 0) blk: {
             pollfds[base_nfds] = .{ .fd = self.debounce_fd, .events = posix.POLL.IN, .revents = 0 };
+            const s = base_nfds;
+            base_nfds += 1;
+            break :blk s;
+        } else null;
+        const hotplug_retry_slot: ?usize = if (self.hotplug_retry_fd >= 0) blk: {
+            pollfds[base_nfds] = .{ .fd = self.hotplug_retry_fd, .events = posix.POLL.IN, .revents = 0 };
             const s = base_nfds;
             base_nfds += 1;
             break :blk s;
@@ -1231,6 +1435,13 @@ pub const Supervisor = struct {
                 }
             }
 
+            if (hotplug_retry_slot) |slot| {
+                if (pollfds[slot].revents & posix.POLL.IN != 0) {
+                    self.drainHotplugRetry();
+                    pollfds[slot].revents = 0;
+                }
+            }
+
             if (listen_slot) |slot| {
                 if (pollfds[slot].revents & posix.POLL.IN != 0) {
                     self.ctrl_sock.?.acceptClient();
@@ -1258,7 +1469,13 @@ pub const Supervisor = struct {
         var path_buf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dev_root, devname });
 
-        const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch return;
+        const fd = posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
+            if (err == error.AccessDenied) {
+                std.log.warn("hotplug: {s} not ready (EACCES)", .{path});
+                return error.AccessDenied;
+            }
+            return;
+        };
         defer posix.close(fd);
 
         var info: ioctl.HidrawDevinfo = undefined;
@@ -1277,21 +1494,50 @@ pub const Supervisor = struct {
         }
         if (cfg == null) return;
 
+        const iface_id = readInterfaceId(path) orelse {
+            std.log.debug("hotplug: {s} sysfs not ready, will retry", .{path});
+            return error.AccessDenied;
+        };
+        const declared = for (cfg.?.device.interface) |ci| {
+            if (iface_id == @as(u8, @intCast(ci.id))) break true;
+        } else false;
+        if (!declared) {
+            std.log.debug("hotplug: {s} interface {} not in config, skipping", .{ path, iface_id });
+            return;
+        }
+
         const phys = try readPhysicalPath(self.allocator, path);
         defer self.allocator.free(phys);
 
+        const default_pr_ptr: ?*mapping_cfg.ParseResult = blk: {
+            const pr = self.loadUserDefaultMapping(cfg.?.device.name) orelse break :blk null;
+            const p = self.allocator.create(mapping_cfg.ParseResult) catch break :blk null;
+            p.* = pr;
+            break :blk p;
+        };
+        const init_mapping: ?*const MappingConfig = if (default_pr_ptr) |p| &p.value else null;
+
         const inst_ptr = try self.allocator.create(DeviceInstance);
         errdefer self.allocator.destroy(inst_ptr);
-        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?) catch |err| {
+        inst_ptr.* = DeviceInstance.init(self.allocator, cfg.?, init_mapping) catch |err| {
             std.log.warn("DeviceInstance.init for {s}: {}", .{ path, err });
             self.allocator.destroy(inst_ptr);
+            if (default_pr_ptr) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
+            }
             return;
         };
-        self.attachWithInstance(devname, phys, inst_ptr) catch |err| {
+        self.attachWithInstance(devname, phys, inst_ptr, default_pr_ptr) catch |err| {
             inst_ptr.deinit();
             self.allocator.destroy(inst_ptr);
+            if (default_pr_ptr) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
+            }
             return err;
         };
+        std.log.info("device attached: \"{s}\" {s}/{s}", .{ cfg.?.device.name, dev_root, devname });
     }
 };
 
@@ -1432,8 +1678,8 @@ test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst_a);
-    try sup.spawnInstance("usb-1-2", inst_b);
+    try sup.spawnInstance("usb-1-1", inst_a, null);
+    try sup.spawnInstance("usb-1-2", inst_b, null);
 
     sup.test_switch_mapping_override = try allocator.dupe(u8, mapping_path);
     sup.test_switch_fail_commit_index = 1;
@@ -1500,7 +1746,7 @@ test "supervisor: Supervisor: SIGHUP updates mapping without restarting instance
     var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1537,7 +1783,7 @@ test "supervisor: Supervisor: SIGHUP with new phys_key spawns new instance" {
     const entry_b = ConfigEntry{ .phys_key = "usb-1-2", .device_cfg = &parsed_dev.value, .mapping_cfg = null };
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst_a);
+    try sup.spawnInstance("usb-1-1", inst_a, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     g_mock_slot = &mock_b;
@@ -1566,8 +1812,8 @@ test "supervisor: Supervisor: SIGHUP with removed phys_key stops instance" {
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst_a);
-    try sup.spawnInstance("usb-1-2", inst_b);
+    try sup.spawnInstance("usb-1-1", inst_a, null);
+    try sup.spawnInstance("usb-1-2", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1596,7 +1842,7 @@ test "supervisor: Supervisor: two rapid reloads serialize — no race condition"
     var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
 
     var map1 = parsed_map1.value;
     var map2 = parsed_map2.value;
@@ -1632,7 +1878,7 @@ test "supervisor: Supervisor: reload null mapping clears existing mapper" {
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     inst.mapping_cfg = &parsed_map.value;
     inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1668,7 +1914,7 @@ test "supervisor: reload with malformed TOML keeps old mapping active" {
     const inst = try makeTestInstance(allocator, &mock, &parsed_dev.value);
     inst.mapping_cfg = &parsed_map.value;
     inst.mapper = try mapper_mod.Mapper.init(&parsed_map.value, inst.loop.timer_fd, allocator);
-    try sup.spawnInstance("usb-1-1", inst);
+    try sup.spawnInstance("usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1739,6 +1985,25 @@ test "supervisor: Supervisor: two toml files, no matching hidraw → zero instan
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 }
 
+test "supervisor: hotplug: config retained when no device online, attach finds it" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(tmp_path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "a.toml", .data = minimal_device_toml });
+
+    var sup = try Supervisor.initForTest(allocator);
+    defer sup.deinit();
+
+    // No device online at startup — config must still be retained for hotplug.
+    try sup.startFromDirWithRoot(tmp_path, "/nonexistent_dev_root_xyz");
+    try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
+    try testing.expectEqual(@as(usize, 1), sup.configs.items.len);
+}
+
 test "supervisor: Supervisor: duplicate attach devname — only one instance created" {
     const allocator = testing.allocator;
 
@@ -1752,7 +2017,7 @@ test "supervisor: Supervisor: duplicate attach devname — only one instance cre
     var sup = try Supervisor.initForTest(allocator);
 
     const inst = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1765,7 +2030,7 @@ test "supervisor: Supervisor: duplicate attach devname — only one instance cre
         inst2.deinit();
         allocator.destroy(inst2);
     }
-    try sup.attachWithInstance("hidraw3", "usb-1-1b", inst2);
+    try sup.attachWithInstance("hidraw3", "usb-1-1b", inst2, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 }
 
@@ -1792,14 +2057,14 @@ test "supervisor: Supervisor: attach-detach-attach same devname — new instance
     var sup = try Supervisor.initForTest(allocator);
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
 
     sup.detach("hidraw3");
     try testing.expectEqual(@as(usize, 0), sup.managed.items.len);
 
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();
@@ -1821,8 +2086,8 @@ test "supervisor: Supervisor: two devnames attached simultaneously — independe
 
     const inst_a = try makeTestInstance(allocator, &mock_a, &parsed_dev.value);
     const inst_b = try makeTestInstance(allocator, &mock_b, &parsed_dev.value);
-    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a);
-    try sup.attachWithInstance("hidraw4", "usb-1-2", inst_b);
+    try sup.attachWithInstance("hidraw3", "usb-1-1", inst_a, null);
+    try sup.attachWithInstance("hidraw4", "usb-1-2", inst_b, null);
     defer {
         sup.stopAll();
         sup.deinit();
