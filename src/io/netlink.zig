@@ -5,13 +5,9 @@ const linux = std.os.linux;
 pub fn openNetlinkUevent() !posix.fd_t {
     const fd = try posix.socket(linux.AF.NETLINK, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, linux.NETLINK.KOBJECT_UEVENT);
     errdefer posix.close(fd);
-    // Group 2 = udev-processed events (device node ready); group 1 = raw kernel events.
-    const addr2 = linux.sockaddr.nl{ .pid = 0, .groups = 2 };
-    posix.bind(fd, @ptrCast(&addr2), @sizeOf(linux.sockaddr.nl)) catch {
-        const addr1 = linux.sockaddr.nl{ .pid = 0, .groups = 1 };
-        try posix.bind(fd, @ptrCast(&addr1), @sizeOf(linux.sockaddr.nl));
-        std.log.warn("netlink: udev group unavailable, falling back to kernel group", .{});
-    };
+    // Group 1 = kernel uevent multicast. Group 2 is a libudev internal socket, not a real kernel group.
+    const addr = linux.sockaddr.nl{ .pid = 0, .groups = 1 };
+    try posix.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.nl));
     return fd;
 }
 
@@ -25,23 +21,22 @@ pub const Uevent = struct {
 
 const libudev_magic = "libudev\x00";
 
-/// Parse a uevent message buffer (group 1 or group 2/udev format).
-/// Group 2 messages start with a 40-byte libudev header; properties_off (u32 LE at offset 16)
-/// gives the byte offset to the null-delimited KEY=val section.
+/// Parse a uevent message buffer.
 /// Group 1 format: "action@path\0KEY=val\0KEY=val\0..."
+/// Defensively handles libudev-prefixed messages (properties_off at offset 16).
 pub fn parseUevent(buf: []const u8) Uevent {
     var action: UeventAction = .other;
     var devname: ?[]const u8 = null;
     var subsystem: ?[]const u8 = null;
 
-    const payload: []const u8 = if (std.mem.startsWith(u8, buf, libudev_magic) and buf.len >= 20) blk: {
+    const payload: []const u8 = if (std.mem.startsWith(u8, buf, libudev_magic) and buf.len >= 40) blk: {
         const off = std.mem.readInt(u32, buf[16..20], .little);
-        break :blk if (off < buf.len) buf[off..] else return .{ .action = .other, .devname = null, .subsystem = null };
+        break :blk if (off >= 40 and off < buf.len) buf[off..] else buf;
     } else buf;
 
     var it = std.mem.splitScalar(u8, payload, 0);
 
-    // Group 1: first token is "action@path"; group 2: first token is also "action@path".
+    // First token is "action@path".
     if (it.next()) |header| {
         if (std.mem.startsWith(u8, header, "add@")) {
             action = .add;
@@ -121,7 +116,7 @@ test "parseUevent: missing DEVNAME" {
     try testing.expectEqualStrings("hidraw", ev.subsystem.?);
 }
 
-test "parseUevent: group 2 libudev header" {
+test "parseUevent: libudev header (defensive)" {
     // Minimal libudev header: 40 bytes, properties_off = 40.
     var msg: [40 + 80]u8 = undefined;
     @memset(&msg, 0);
