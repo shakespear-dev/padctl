@@ -108,6 +108,9 @@ pub const Mapper = struct {
             self.gyro_proc.reset();
             self.stick_left.reset();
             self.stick_right.reset();
+            // Reset dpad prev so edge detection fires on the next frame.
+            self.prev.dpad_x = 0;
+            self.prev.dpad_y = 0;
             // Cancel in-flight macros; emit releases for any held keys.
             for (self.active_macros.items) |*p| p.emitPendingReleases(&aux);
             self.active_macros.clearRetainingCapacity();
@@ -295,7 +298,11 @@ pub const Mapper = struct {
     }
 
     pub fn onTimerExpired(self: *Mapper) AuxEventList {
-        _ = self.layer.onTimerExpired();
+        const th_res = self.layer.onTimerExpired();
+        if (th_res.layer_activated) {
+            self.prev.dpad_x = 0;
+            self.prev.dpad_y = 0;
+        }
 
         var aux = AuxEventList{};
         var buf: [16]timer_queue_mod.Deadline = undefined;
@@ -770,6 +777,51 @@ test "mapper: layer dpad override: active layer dpad config used" {
     const dcfg = m.effectiveDpadConfig();
     try testing.expectEqualStrings("arrows", dcfg.mode);
     try testing.expectEqual(@as(?bool, true), dcfg.suppress_gamepad);
+}
+
+test "mapper: dpad arrows layer: key events fire after hold-timer activation" {
+    // Regression: when a hold-layer activates via timer (PENDING→ACTIVE), self.prev.dpad_x/y
+    // retains the pressed value. Without the prev reset, processDpad sees curr==prev and
+    // emits no edge. Fix: reset prev.dpad_x/y on active_changed.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "nav"
+        \\trigger = "LT"
+        \\activation = "hold"
+        \\
+        \\[layer.dpad]
+        \\mode = "arrows"
+        \\suppress_gamepad = true
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const lt_mask: u64 = @as(u64, 1) << lt_idx;
+
+    // Frame 1: LT + dpad-up pressed simultaneously → layer PENDING, dpad recorded in prev
+    _ = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16);
+
+    // Timer fires: PENDING → ACTIVE
+    _ = m.onTimerExpired();
+
+    // Frame 2: still holding LT + dpad-up, but now layer is ACTIVE (active_changed=true)
+    // prev.dpad_y should be reset to 0 so edge triggers KEY_UP press
+    const configs = parsed.value.layer.?;
+    _ = configs; // suppress unused warning
+    const ev = try m.apply(.{ .buttons = lt_mask, .dpad_y = -1 }, 16);
+
+    var got_key_up = false;
+    for (ev.aux.slice()) |e| switch (e) {
+        .key => |k| if (k.code == c.KEY_UP and k.pressed) {
+            got_key_up = true;
+        },
+        else => {},
+    };
+    try testing.expect(got_key_up);
 }
 
 test "mapper: gamepad_button tap: injected this frame, released next frame" {
@@ -1266,10 +1318,11 @@ test "mapper: stick scroll REL_WHEEL and REL_HWHEEL codes verified" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
+    // ry < 0 = stick up → REL_WHEEL > 0 (scroll up); rx > 0 → REL_HWHEEL > 0
     var wheel_value: i32 = 0;
     var hwheel_value: i32 = 0;
     for (0..30) |_| {
-        const ev = try m.apply(.{ .rx = 32000, .ry = 32000 }, 16);
+        const ev = try m.apply(.{ .rx = 32000, .ry = -32000 }, 16);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| {
                 if (r.code == REL_WHEEL) wheel_value += r.value;
@@ -1283,7 +1336,7 @@ test "mapper: stick scroll REL_WHEEL and REL_HWHEEL codes verified" {
     try testing.expect(hwheel_value > 0);
 }
 
-test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
+test "mapper: stick scroll positive ry gives negative REL_WHEEL values" {
     const allocator = testing.allocator;
     const parsed = try makeMapping(
         \\[stick.right]
@@ -1295,9 +1348,10 @@ test "mapper: stick scroll negative axis gives negative REL_WHEEL values" {
     var m = try makeMapper(&parsed.value, allocator);
     defer m.deinit();
 
+    // ry > 0 = stick down → REL_WHEEL < 0 (scroll down)
     var wheel_value: i32 = 0;
     for (0..30) |_| {
-        const ev = try m.apply(.{ .rx = 0, .ry = -32000 }, 16);
+        const ev = try m.apply(.{ .rx = 0, .ry = 32000 }, 16);
         for (ev.aux.slice()) |e| switch (e) {
             .rel => |r| if (r.code == REL_WHEEL) {
                 wheel_value += r.value;

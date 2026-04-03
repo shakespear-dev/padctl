@@ -63,7 +63,7 @@ pub const StickProcessor = struct {
 
     fn processScrollMode(self: *StickProcessor, x: i16, y: i16, cfg: *const StickConfig, dt_ms: f32) StickOutput {
         const fy = applyDeadzone(y, cfg.deadzone);
-        self.scroll_accum += (fy / 32768.0) * cfg.sensitivity * dt_ms / 100.0;
+        self.scroll_accum += -(fy / 32768.0) * cfg.sensitivity * dt_ms / 100.0;
         const wheel: i32 = @intFromFloat(@trunc(self.scroll_accum));
         self.scroll_accum -= @floatFromInt(wheel);
 
@@ -152,7 +152,7 @@ test "stick: scroll mode: accumulates to step" {
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
     var steps: i32 = 0;
     for (0..20) |_| {
-        const out = sp.process(&cfg, 0, 32767, 16);
+        const out = sp.process(&cfg, 0, -32767, 16);
         steps += out.wheel;
     }
     try testing.expect(steps > 0);
@@ -230,7 +230,7 @@ test "stick: scroll mode Y axis produces wheel, not hwheel" {
     const cfg = StickConfig{ .mode = "scroll", .deadzone = 0, .sensitivity = 10.0 };
     var vsteps: i32 = 0;
     for (0..20) |_| {
-        const out = sp.process(&cfg, 0, 32767, 16);
+        const out = sp.process(&cfg, 0, -32767, 16);
         vsteps += out.wheel;
         try testing.expectEqual(@as(i32, 0), out.hwheel);
     }
@@ -243,7 +243,7 @@ test "stick: scroll mode both axes produce independent outputs" {
     var total_wheel: i32 = 0;
     var total_hwheel: i32 = 0;
     for (0..20) |_| {
-        const out = sp.process(&cfg, 32767, 32767, 16);
+        const out = sp.process(&cfg, 32767, -32767, 16);
         total_wheel += out.wheel;
         total_hwheel += out.hwheel;
     }
