@@ -75,9 +75,17 @@ pub const ReportConfig = struct {
     checksum: ?ChecksumConfig = null,
 };
 
+pub const CommandChecksumConfig = struct {
+    algo: []const u8,
+    range: []const i64,
+    offset: i64,
+    seed: ?i64 = null,
+};
+
 pub const CommandConfig = struct {
     interface: i64,
     template: []const u8,
+    checksum: ?CommandChecksumConfig = null,
 };
 
 pub const AxisConfig = struct {
