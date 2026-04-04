@@ -331,7 +331,7 @@ test "T-E2E-1: UHID axis report flows through to EV_ABS on eventN" {
     const parsed = try device_mod.parseString(allocator, output_toml);
     defer parsed.deinit();
 
-    var udev = try UinputDevice.create(&parsed.value.output.?);
+    var udev = try UinputDevice.create(&parsed.value.output.?, null);
     defer udev.close();
     udevadmSettle();
 
@@ -420,7 +420,7 @@ test "T-E2E-2: UHID button press flows through to EV_KEY on eventN" {
     const parsed = try device_mod.parseString(allocator, button_toml);
     defer parsed.deinit();
 
-    var udev = try UinputDevice.create(&parsed.value.output.?);
+    var udev = try UinputDevice.create(&parsed.value.output.?, null);
     defer udev.close();
     udevadmSettle();
 
@@ -526,7 +526,7 @@ test "T-E2E-3: report with bad match byte produces no output event" {
     const parsed = try device_mod.parseString(allocator, match_toml);
     defer parsed.deinit();
 
-    var udev = try UinputDevice.create(&parsed.value.output.?);
+    var udev = try UinputDevice.create(&parsed.value.output.?, null);
     defer udev.close();
     udevadmSettle();
 

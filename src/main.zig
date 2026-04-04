@@ -688,7 +688,7 @@ pub fn main() !void {
         break :blk null;
     };
 
-    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping) catch |err| {
+    var inst = DeviceInstance.init(allocator, &device_cfg.value, init_mapping, null) catch |err| {
         std.log.err("failed to init device: {}", .{err});
         std.process.exit(1);
     };

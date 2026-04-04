@@ -11,6 +11,8 @@ const TouchpadDevice = uinput.TouchpadDevice;
 const OutputDevice = uinput.OutputDevice;
 const AuxOutputDevice = uinput.AuxOutputDevice;
 const TouchpadOutputDevice = uinput.TouchpadOutputDevice;
+const MotionSensorDevice = uinput.MotionSensorDevice;
+const MotionSensorOutputDevice = uinput.MotionSensorOutputDevice;
 const GenericUinputDevice = uinput.GenericUinputDevice;
 const GenericOutputDevice = uinput.GenericOutputDevice;
 const generic = @import("core/generic.zig");
@@ -81,6 +83,7 @@ pub const DeviceInstance = struct {
     uinput_dev: ?UinputDevice,
     aux_dev: ?AuxDevice,
     touchpad_dev: ?TouchpadDevice,
+    motion_sensor_dev: ?MotionSensorDevice = null,
     generic_state: ?generic.GenericDeviceState,
     generic_uinput: ?GenericUinputDevice,
     device_cfg: *const DeviceConfig,
@@ -92,7 +95,7 @@ pub const DeviceInstance = struct {
     /// Open all interfaces, run init handshake, create EventLoop/Interpreter/Output.
     /// init_mapping: optional MappingConfig used to auto-derive aux capabilities when
     /// [output.aux] is absent from the device config.
-    pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig, init_mapping: ?*const MappingConfig) !DeviceInstance {
+    pub fn init(allocator: std.mem.Allocator, cfg: *const DeviceConfig, init_mapping: ?*const MappingConfig, phys: ?[]const u8) !DeviceInstance {
         const vid: u16 = @intCast(cfg.device.vid);
         const pid: u16 = @intCast(cfg.device.pid);
 
@@ -140,7 +143,7 @@ pub const DeviceInstance = struct {
                 generic_uinput = try GenericUinputDevice.create(out_cfg, &generic_state.?);
             }
         } else if (cfg.output) |*out_cfg| {
-            uinput_dev = try UinputDevice.create(out_cfg);
+            uinput_dev = try UinputDevice.create(out_cfg, phys);
             if (out_cfg.force_feedback != null) {
                 errdefer uinput_dev.?.close();
                 try loop.addUinputFf(uinput_dev.?.pollFfFd());
@@ -183,6 +186,18 @@ pub const DeviceInstance = struct {
                 touchpad_dev = try TouchpadDevice.create(tp_cfg);
             }
         }
+        var motion_sensor_dev: ?MotionSensorDevice = null;
+        if (cfg.output) |*out_cfg| {
+            if (out_cfg.motion_sensor) |*ms_cfg| {
+                motion_sensor_dev = MotionSensorDevice.create(ms_cfg, out_cfg, phys) catch |err| blk: {
+                    std.log.warn("motion sensor device creation failed: {}", .{err});
+                    break :blk null;
+                };
+                if (motion_sensor_dev) |_| {
+                    std.log.info("motion sensor device created", .{});
+                }
+            }
+        }
         const mapper: ?Mapper = if (init_mapping) |mcfg|
             Mapper.init(mcfg, loop.timer_fd, allocator) catch |err| blk: {
                 std.log.warn("failed to init mapper from default_mapping: {}", .{err});
@@ -207,6 +222,7 @@ pub const DeviceInstance = struct {
             .uinput_dev = uinput_dev,
             .aux_dev = aux_dev,
             .touchpad_dev = touchpad_dev,
+            .motion_sensor_dev = motion_sensor_dev,
             .generic_state = generic_state,
             .generic_uinput = generic_uinput,
             .device_cfg = cfg,
@@ -220,6 +236,7 @@ pub const DeviceInstance = struct {
         if (self.uinput_dev) |*u| u.close();
         if (self.aux_dev) |*a| a.close();
         if (self.touchpad_dev) |*tp| tp.close();
+        if (self.motion_sensor_dev) |*ms| ms.close();
         if (self.generic_uinput) |*gu| gu.close();
         for (self.devices) |dev| dev.close();
         self.allocator.free(self.devices);
@@ -249,6 +266,7 @@ pub const DeviceInstance = struct {
             const output = if (self.uinput_dev) |*u| u.outputDevice() else nullOutput();
             const aux_output: ?AuxOutputDevice = if (self.aux_dev) |*a| a.auxOutputDevice() else null;
             const touchpad_output: ?TouchpadOutputDevice = if (self.touchpad_dev) |*tp| tp.touchpadOutputDevice() else null;
+            const motion_sensor_output: ?MotionSensorOutputDevice = if (self.motion_sensor_dev) |*ms| ms.motionSensorOutputDevice() else null;
             const generic_output: ?GenericOutputDevice = if (self.generic_uinput) |*gu| gu.genericOutputDevice() else null;
             const mapper_ptr: ?*Mapper = if (self.mapper) |*m| m else null;
 
@@ -261,6 +279,7 @@ pub const DeviceInstance = struct {
                 .mapper = mapper_ptr,
                 .aux_output = aux_output,
                 .touchpad_output = touchpad_output,
+                .motion_sensor_output = motion_sensor_output,
                 .allocator = self.allocator,
                 .device_config = self.device_cfg,
                 .mapping_config = mcfg,

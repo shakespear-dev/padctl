@@ -772,7 +772,7 @@ test "l3_e2e: generative full pipeline for all device configs with mapping" {
         defer allocator.free(hidraw_path);
 
         // Create uinput device
-        var udev = UinputDevice.create(out_cfg) catch |err| {
+        var udev = UinputDevice.create(out_cfg, null) catch |err| {
             std.debug.print("SKIP uinput create failed for {s}: {}\n", .{ config_path, err });
             devices_skipped += 1;
             continue;
@@ -1206,7 +1206,7 @@ test "l3_e2e: fully generated random device config + random mapping — DRT" {
         defer allocator.free(hidraw_path);
 
         // 5. Create uinput device for output
-        var udev = UinputDevice.create(out_cfg) catch |err| {
+        var udev = UinputDevice.create(out_cfg, null) catch |err| {
             std.debug.print("SKIP uinput create failed [ci={d}]: {}\n", .{ ci, err });
             configs_skipped += 1;
             continue;

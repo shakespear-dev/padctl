@@ -130,6 +130,11 @@ pub const MappingEntry = struct {
     res: ?i64 = null,
 };
 
+pub const MotionSensorConfig = struct {
+    name: ?[]const u8 = null,
+    axes: ?toml.HashMap(AxisConfig) = null,
+};
+
 pub const OutputConfig = struct {
     emulate: ?[]const u8 = null,
     name: ?[]const u8 = null,
@@ -141,6 +146,7 @@ pub const OutputConfig = struct {
     force_feedback: ?FfConfig = null,
     aux: ?AuxConfig = null,
     touchpad: ?TouchpadConfig = null,
+    motion_sensor: ?MotionSensorConfig = null,
     mapping: ?toml.HashMap(MappingEntry) = null,
 };
 

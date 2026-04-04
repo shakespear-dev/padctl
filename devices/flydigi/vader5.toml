@@ -92,7 +92,11 @@ M1     = "BTN_TRIGGER_HAPPY5"
 M2     = "BTN_TRIGGER_HAPPY7"
 M3     = "BTN_TRIGGER_HAPPY6"
 M4     = "BTN_TRIGGER_HAPPY8"
-# O      = "BTN_TRIGGER_HAPPY9"
+C      = "BTN_TRIGGER_HAPPY1"
+Z      = "BTN_TRIGGER_HAPPY2"
+LM     = "BTN_TRIGGER_HAPPY3"
+RM     = "BTN_TRIGGER_HAPPY4"
+O      = "BTN_TRIGGER_HAPPY9"
 
 [output.dpad]
 type = "hat"
@@ -100,6 +104,17 @@ type = "hat"
 [output.aux]
 type = "mouse"
 name = "Vader 5 Pro Virtual Mouse"
+
+[output.motion_sensor]
+name = "Vader 5 Pro Motion Sensor"
+
+[output.motion_sensor.axes]
+accel_x = { code = "ABS_X",  min = -32768, max = 32767, res = 8192 }
+accel_y = { code = "ABS_Y",  min = -32768, max = 32767, res = 8192 }
+accel_z = { code = "ABS_Z",  min = -32768, max = 32767, res = 8192 }
+gyro_x  = { code = "ABS_RX", min = -32768, max = 32767, res = 1024 }
+gyro_y  = { code = "ABS_RY", min = -32768, max = 32767, res = 1024 }
+gyro_z  = { code = "ABS_RZ", min = -32768, max = 32767, res = 1024 }
 
 [output.force_feedback]
 type = "rumble"

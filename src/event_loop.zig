@@ -8,6 +8,7 @@ const Interpreter = interpreter_mod.Interpreter;
 const OutputDevice = @import("io/uinput.zig").OutputDevice;
 const AuxOutputDevice = @import("io/uinput.zig").AuxOutputDevice;
 const TouchpadOutputDevice = @import("io/uinput.zig").TouchpadOutputDevice;
+const MotionSensorOutputDevice = @import("io/uinput.zig").MotionSensorOutputDevice;
 const generic = @import("core/generic.zig");
 const GenericDeviceState = generic.GenericDeviceState;
 const GenericOutputDevice = @import("io/uinput.zig").GenericOutputDevice;
@@ -66,6 +67,7 @@ pub const EventLoopContext = struct {
     mapper: ?*mapper_mod.Mapper = null,
     aux_output: ?AuxOutputDevice = null,
     touchpad_output: ?TouchpadOutputDevice = null,
+    motion_sensor_output: ?MotionSensorOutputDevice = null,
     allocator: ?std.mem.Allocator = null,
     device_config: ?*const DeviceConfig = null,
     mapping_config: ?*const MappingConfig = null,
@@ -389,6 +391,15 @@ pub const EventLoop = struct {
                             break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
                         };
                         if (maybe_delta) |delta| {
+                            self.gamepad_state.applyDelta(delta);
+
+                            // Motion sensor: always emit raw data independent of mapper
+                            if (ctx.motion_sensor_output) |ms| {
+                                ms.emitMotion(self.gamepad_state) catch |err| {
+                                    std.log.warn("motion sensor emit failed: {}", .{err});
+                                };
+                            }
+
                             if (ctx.mapper) |m| {
                                 const events = m.apply(delta, dt_ms) catch |err| {
                                     std.log.err("mapper.apply failed: {}", .{err});
@@ -407,7 +418,6 @@ pub const EventLoop = struct {
                                     if (events.aux.len > 0) ao.emitAux(events.aux.slice()) catch {};
                                 }
                             } else {
-                                self.gamepad_state.applyDelta(delta);
                                 self.gamepad_state.synthesizeDpadAxes();
                                 ctx.output.emit(self.gamepad_state) catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});

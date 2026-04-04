@@ -45,6 +45,16 @@ fn ioctlPtr(fd: std.posix.fd_t, request: u32, ptr: usize) !void {
     };
 }
 
+const UI_SET_PHYS = ioctl_constants.UI_SET_PHYS;
+
+fn setPhys(fd: std.posix.fd_t, phys: []const u8) void {
+    var buf: [256]u8 = [_]u8{0} ** 256;
+    const len = @min(phys.len, buf.len - 1);
+    @memcpy(buf[0..len], phys[0..len]);
+    const rc = std.os.linux.ioctl(fd, UI_SET_PHYS, @intFromPtr(&buf));
+    if (rc != 0) std.log.debug("UI_SET_PHYS failed: rc={d}", .{@as(isize, @bitCast(rc))});
+}
+
 pub const FfEffect = struct { strong: u16 = 0, weak: u16 = 0 };
 
 pub const FfEvent = struct {
@@ -116,7 +126,7 @@ pub const UinputDevice = struct {
 
     const AxisStateField = enum { ax, ay, rx, ry, lt, rt, dpad_x, dpad_y };
 
-    pub fn create(cfg: *const device.OutputConfig) !UinputDevice {
+    pub fn create(cfg: *const device.OutputConfig, phys: ?[]const u8) !UinputDevice {
         const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
         const fd = try std.posix.open("/dev/uinput", flags, 0);
         errdefer std.posix.close(fd);
@@ -223,7 +233,8 @@ pub const UinputDevice = struct {
             }
         }
 
-        // Step 6: UI_DEV_CREATE
+        // Step 6: set physical path + create
+        if (phys) |p| setPhys(fd, p);
         try ioctlPtr(fd, UI_DEV_CREATE, 0);
 
         return .{
@@ -650,6 +661,161 @@ pub const TouchpadDevice = struct {
     }
 
     pub fn close(self: *TouchpadDevice) void {
+        _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
+        std.posix.close(self.fd);
+    }
+};
+
+// --- Motion Sensor Device ---
+
+pub const MotionSensorOutputDevice = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        emit_motion: *const fn (ptr: *anyopaque, s: state.GamepadState) EmitError!void,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn emitMotion(self: MotionSensorOutputDevice, s: state.GamepadState) EmitError!void {
+        return self.vtable.emit_motion(self.ptr, s);
+    }
+
+    pub fn close(self: MotionSensorOutputDevice) void {
+        self.vtable.close(self.ptr);
+    }
+};
+
+pub const MotionSensorDevice = struct {
+    fd: std.posix.fd_t,
+    axis_codes: [MAX_MOTION_AXES]u16,
+    axis_fields: [MAX_MOTION_AXES]MotionAxisField,
+    axis_count: u8,
+    prev_values: [MAX_MOTION_AXES]i32 = [_]i32{0} ** MAX_MOTION_AXES,
+
+    const MAX_MOTION_AXES = 6;
+    const MSC_TIMESTAMP = 0x05;
+
+    const MotionAxisField = enum { gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z };
+
+    fn resolveMotionField(name: []const u8) ?MotionAxisField {
+        return std.meta.stringToEnum(MotionAxisField, name);
+    }
+
+    fn getFieldValue(s: state.GamepadState, field: MotionAxisField) i32 {
+        return switch (field) {
+            .gyro_x => s.gyro_x,
+            .gyro_y => s.gyro_y,
+            .gyro_z => s.gyro_z,
+            .accel_x => s.accel_x,
+            .accel_y => s.accel_y,
+            .accel_z => s.accel_z,
+        };
+    }
+
+    pub fn create(ms_cfg: *const device.MotionSensorConfig, out_cfg: *const device.OutputConfig, phys: ?[]const u8) !MotionSensorDevice {
+        const flags = std.posix.O{ .ACCMODE = .RDWR, .NONBLOCK = true };
+        const fd = try std.posix.open("/dev/uinput", flags, 0);
+        errdefer std.posix.close(fd);
+
+        try ioctlInt(fd, UI_SET_EVBIT, c.EV_ABS);
+        try ioctlInt(fd, UI_SET_EVBIT, c.EV_MSC);
+        try ioctlInt(fd, UI_SET_PROPBIT, c.INPUT_PROP_ACCELEROMETER);
+
+        try ioctlInt(fd, ioctl_constants.UI_SET_MSCBIT, MSC_TIMESTAMP);
+
+        var axis_codes: [MAX_MOTION_AXES]u16 = undefined;
+        var axis_fields: [MAX_MOTION_AXES]MotionAxisField = undefined;
+        var axis_count: u8 = 0;
+
+        if (ms_cfg.axes) |axes| {
+            var it = axes.map.iterator();
+            while (it.next()) |entry| {
+                if (axis_count >= MAX_MOTION_AXES) break;
+                const code = input_codes.resolveAbsCode(entry.value_ptr.*.code) catch continue;
+                const field = resolveMotionField(entry.key_ptr.*) orelse continue;
+
+                try ioctlInt(fd, UI_SET_ABSBIT, @intCast(code));
+
+                var abs_setup = std.mem.zeroes(c.uinput_abs_setup);
+                abs_setup.code = code;
+                abs_setup.absinfo.minimum = @intCast(entry.value_ptr.*.min);
+                abs_setup.absinfo.maximum = @intCast(entry.value_ptr.*.max);
+                if (entry.value_ptr.*.res) |r| abs_setup.absinfo.resolution = @intCast(r);
+                if (entry.value_ptr.*.fuzz) |f| abs_setup.absinfo.fuzz = @intCast(f);
+                if (entry.value_ptr.*.flat) |fl| abs_setup.absinfo.flat = @intCast(fl);
+                try ioctlPtr(fd, UI_ABS_SETUP, @intFromPtr(&abs_setup));
+
+                axis_codes[axis_count] = code;
+                axis_fields[axis_count] = field;
+                axis_count += 1;
+            }
+        }
+
+        var setup = std.mem.zeroes(c.uinput_setup);
+        const name = ms_cfg.name orelse "padctl-motion";
+        const copy_len = @min(name.len, setup.name.len - 1);
+        @memcpy(setup.name[0..copy_len], name[0..copy_len]);
+        setup.id.bustype = c.BUS_VIRTUAL;
+        if (out_cfg.vid) |v| setup.id.vendor = @intCast(v);
+        if (out_cfg.pid) |p| setup.id.product = @intCast(p);
+        try ioctlPtr(fd, UI_DEV_SETUP, @intFromPtr(&setup));
+        if (phys) |p| setPhys(fd, p);
+        try ioctlPtr(fd, UI_DEV_CREATE, 0);
+
+        return .{
+            .fd = fd,
+            .axis_codes = axis_codes,
+            .axis_fields = axis_fields,
+            .axis_count = axis_count,
+        };
+    }
+
+    pub fn emit(self: *MotionSensorDevice, s: state.GamepadState) !void {
+        var events: [MAX_MOTION_AXES + 2]c.input_event = undefined; // axes + MSC_TIMESTAMP + SYN
+        var n: usize = 0;
+
+        for (0..self.axis_count) |i| {
+            const val = getFieldValue(s, self.axis_fields[i]);
+            if (val != self.prev_values[i]) {
+                events[n] = .{ .type = c.EV_ABS, .code = self.axis_codes[i], .value = val, .time = std.mem.zeroes(c.timeval) };
+                n += 1;
+                self.prev_values[i] = val;
+            }
+        }
+
+        if (n > 0) {
+            // MSC_TIMESTAMP in microseconds, wraps every ~35.8 minutes
+            const now_us: i32 = @intCast(@mod(std.time.microTimestamp(), @as(i64, std.math.maxInt(i32)) + 1));
+            events[n] = .{ .type = c.EV_MSC, .code = MSC_TIMESTAMP, .value = now_us, .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+
+            events[n] = .{ .type = c.EV_SYN, .code = c.SYN_REPORT, .value = 0, .time = std.mem.zeroes(c.timeval) };
+            n += 1;
+            _ = try std.posix.write(self.fd, std.mem.sliceAsBytes(events[0..n]));
+        }
+    }
+
+    pub fn motionSensorOutputDevice(self: *MotionSensorDevice) MotionSensorOutputDevice {
+        return .{ .ptr = self, .vtable = &ms_vtable };
+    }
+
+    const ms_vtable = MotionSensorOutputDevice.VTable{
+        .emit_motion = emitMotionVtable,
+        .close = closeMotionVtable,
+    };
+
+    fn emitMotionVtable(ptr: *anyopaque, s: state.GamepadState) EmitError!void {
+        const self: *MotionSensorDevice = @ptrCast(@alignCast(ptr));
+        self.emit(s) catch return error.WriteFailed;
+    }
+
+    fn closeMotionVtable(ptr: *anyopaque) void {
+        const self: *MotionSensorDevice = @ptrCast(@alignCast(ptr));
+        self.close();
+    }
+
+    pub fn close(self: *MotionSensorDevice) void {
         _ = std.os.linux.ioctl(self.fd, UI_DEV_DESTROY, 0);
         std.posix.close(self.fd);
     }
