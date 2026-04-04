@@ -1,7 +1,13 @@
-name = "vader5-main"
+name = "vader5"
 
-# Base layer: all buttons pass through as gamepad (no remaps)
-# M1-M4, LM, RM, C, Z, O all register as BTN_TRIGGER_HAPPY in Steam
+# Default mapping for Flydigi Vader 5 Pro
+#
+# Base: standard gamepad passthrough — all buttons and sticks work as-is.
+# Hold LM: aim mode — gyro + right stick act as mouse for camera control.
+# Hold RM: mouse mode — right stick moves cursor, A/B are mouse clicks.
+#
+# Edit ~/.config/padctl/mappings/vader5.toml for personal customizations.
+# Apply changes with: padctl switch vader5
 
 [gyro]
 mode = "off"
@@ -19,20 +25,12 @@ sensitivity = 1.0
 [dpad]
 mode = "gamepad"
 
-# Layer 1: Aim mode (hold LM)
-# Gyro → mouse aim, right stick → mouse, left stick → scroll, dpad → arrows
+# Aim mode (hold LM): gyro + right stick → mouse for camera/aim
 [[layer]]
 name = "aim"
 trigger = "LM"
 activation = "hold"
-tap = "mouse_side"
 hold_timeout = 200
-
-[layer.remap]
-RB = "mouse_left"
-RT = "mouse_right"
-RM = "mouse_middle"
-A = "KEY_LEFTMETA"
 
 [layer.gyro]
 mode = "mouse"
@@ -41,29 +39,17 @@ deadzone = 40
 smoothing = 0.4
 invert_y = true
 
-[layer.stick_left]
-mode = "scroll"
-sensitivity = 0.8
-deadzone = 200
-suppress_gamepad = true
-
 [layer.stick_right]
 mode = "mouse"
 sensitivity = 40.0
 deadzone = 2000
 suppress_gamepad = true
 
-[layer.dpad]
-mode = "arrows"
-suppress_gamepad = true
-
-# Layer 2: Desktop/mouse mode (hold RM)
-# Right stick → mouse, dpad → arrows, A/B → mouse clicks
+# Mouse mode (hold RM): right stick → cursor, A/B → mouse clicks
 [[layer]]
 name = "mouse"
 trigger = "RM"
 activation = "hold"
-tap = "mouse_middle"
 hold_timeout = 150
 
 [layer.remap]
@@ -75,20 +61,3 @@ mode = "mouse"
 sensitivity = 40.0
 deadzone = 2000
 suppress_gamepad = true
-
-[layer.dpad]
-mode = "arrows"
-suppress_gamepad = true
-
-# Layer 3: Gyro toggle (tap M1 to enable/disable gyro)
-[[layer]]
-name = "gyro_toggle"
-trigger = "Z"
-activation = "toggle"
-
-[layer.gyro]
-mode = "mouse"
-sensitivity = 60.0
-deadzone = 40
-smoothing = 0.4
-invert_y = true
