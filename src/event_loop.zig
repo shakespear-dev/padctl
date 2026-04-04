@@ -305,20 +305,20 @@ pub const EventLoop = struct {
                                         const ff_type = if (dcfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
                                         if (cmds.map.get(ff_type)) |cmd| {
                                             if (resolveIfaceIdx(dcfg, cmd.interface)) |iface_idx| {
-                                            if (iface_idx < ctx.devices.len) {
-                                                const params = [_]Param{
-                                                    .{ .name = "strong", .value = ff_ev.strong },
-                                                    .{ .name = "weak", .value = ff_ev.weak },
-                                                };
-                                                if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
-                                                    defer alloc.free(bytes);
-                                                    if (cmd.checksum) |*cs| {
-                                                        applyChecksum(bytes, cs);
-                                                    }
-                                                    ctx.devices[iface_idx].write(bytes) catch {};
-                                                    self.last_rumble_ns = now_ns;
-                                                } else |_| {}
-                                            }
+                                                if (iface_idx < ctx.devices.len) {
+                                                    const params = [_]Param{
+                                                        .{ .name = "strong", .value = ff_ev.strong },
+                                                        .{ .name = "weak", .value = ff_ev.weak },
+                                                    };
+                                                    if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
+                                                        defer alloc.free(bytes);
+                                                        if (cmd.checksum) |*cs| {
+                                                            applyChecksum(bytes, cs);
+                                                        }
+                                                        ctx.devices[iface_idx].write(bytes) catch {};
+                                                        self.last_rumble_ns = now_ns;
+                                                    } else |_| {}
+                                                }
                                             }
                                         }
                                     }

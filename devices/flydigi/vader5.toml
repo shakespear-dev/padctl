@@ -2,6 +2,7 @@
 name = "Flydigi Vader 5 Pro"
 vid = 0x37d7
 pid = 0x2401
+block_kernel_drivers = ["xpad"]
 
 # Only IF1 is used. IF0 is vendor-class (bInterfaceClass=255) with no
 # hidraw node; the reference driver also uses IF1 exclusively.
