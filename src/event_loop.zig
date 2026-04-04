@@ -389,6 +389,8 @@ pub const EventLoop = struct {
                             break :blk ctx.interpreter.processReport(interface_id, buf[0..n]) catch null;
                         };
                         if (maybe_delta) |delta| {
+                            self.gamepad_state.applyDelta(delta);
+
                             if (ctx.mapper) |m| {
                                 const events = m.apply(delta, dt_ms) catch |err| {
                                     std.log.err("mapper.apply failed: {}", .{err});
@@ -407,7 +409,6 @@ pub const EventLoop = struct {
                                     if (events.aux.len > 0) ao.emitAux(events.aux.slice()) catch {};
                                 }
                             } else {
-                                self.gamepad_state.applyDelta(delta);
                                 self.gamepad_state.synthesizeDpadAxes();
                                 ctx.output.emit(self.gamepad_state) catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
