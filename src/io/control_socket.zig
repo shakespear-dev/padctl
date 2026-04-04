@@ -175,9 +175,13 @@ pub fn parseCommand(raw: []const u8) Command {
 }
 
 fn containsPathTraversal(s: []const u8) bool {
-    return std.mem.indexOfScalar(u8, s, '/') != null or
-        std.mem.indexOfScalar(u8, s, '\\') != null or
-        std.mem.indexOf(u8, s, "..") != null;
+    // Always block ".." and backslashes
+    if (std.mem.indexOf(u8, s, "..") != null) return true;
+    if (std.mem.indexOfScalar(u8, s, '\\') != null) return true;
+    // Absolute paths (client-resolved) are allowed — they start with /
+    // Bare names must not contain slashes
+    if (s.len > 0 and s[0] == '/') return false;
+    return std.mem.indexOfScalar(u8, s, '/') != null;
 }
 
 // --- tests ---
@@ -243,6 +247,14 @@ test "control_socket: parseCommand: path traversal rejected" {
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH foo/bar\n").tag);
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH a\\b\n").tag);
     try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH ok --device ../x\n").tag);
+    // Absolute paths with traversal still rejected
+    try testing.expectEqual(CommandTag.unknown, parseCommand("SWITCH /etc/../shadow\n").tag);
+}
+
+test "control_socket: parseCommand: absolute path accepted" {
+    const cmd = parseCommand("SWITCH /home/user/.config/padctl/mappings/vader5.toml\n");
+    try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
+    try testing.expectEqualStrings("/home/user/.config/padctl/mappings/vader5.toml", cmd.name);
 }
 
 fn testSocketpair() ![2]posix.fd_t {
