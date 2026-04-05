@@ -57,14 +57,16 @@ pub fn detectImmutableOs(allocator: std.mem.Allocator, root_prefix: []const u8) 
     defer allocator.free(ostree_path);
     if (std.fs.accessAbsolute(ostree_path, .{})) |_| {
         return .ostree;
-    } else |_| {}
+    } else |_| {
+        // Not ostree (file missing, permission denied, symlink loop, etc.)
+    }
 
     // Fallback: check if /usr is writable (non-destructive, no file creation).
     const usr_path = std.fmt.allocPrint(allocator, "{s}/usr", .{root_prefix}) catch return .none;
     defer allocator.free(usr_path);
-    std.fs.accessAbsolute(usr_path, .{ .mode = .write_only }) catch |err| {
-        if (err == error.AccessDenied or err == error.ReadOnlyFileSystem)
-            return .read_only_usr;
+    std.fs.accessAbsolute(usr_path, .{ .mode = .write_only }) catch |err| switch (err) {
+        error.AccessDenied, error.ReadOnlyFileSystem => return .read_only_usr,
+        else => return .none,
     };
     return .none;
 }
