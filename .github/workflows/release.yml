@@ -135,3 +135,59 @@ jobs:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${TAG}" SHA256SUMS.txt --clobber
+
+      - name: Upload SHA256SUMS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: SHA256SUMS.txt
+
+  update-aur:
+    needs: checksums
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.ref_name, '-rc') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SHA256SUMS
+        uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+
+      - name: Setup SSH
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${AUR_SSH_KEY}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          echo "Host aur.archlinux.org" >> ~/.ssh/config
+          echo "  IdentityFile ~/.ssh/aur" >> ~/.ssh/config
+          echo "  User aur" >> ~/.ssh/config
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Update padctl-bin PKGBUILD
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          X86_HASH=$(grep "x86_64-linux-musl" SHA256SUMS.txt | awk '{print $1}')
+          ARM_HASH=$(grep "aarch64-linux-musl" SHA256SUMS.txt | awk '{print $1}')
+
+          git clone ssh://aur@aur.archlinux.org/padctl-bin.git /tmp/padctl-bin
+          cd /tmp/padctl-bin
+
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${X86_HASH}')/" PKGBUILD
+          sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${ARM_HASH}')/" PKGBUILD
+
+          docker run --rm -v "$PWD:/pkg" -w /pkg archlinux:latest bash -c \
+            "pacman -Sy --noconfirm pacman-contrib && makepkg --printsrcinfo > .SRCINFO"
+
+          git config user.name "bananasjim"
+          git config user.email "bananasjim1@gmail.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "update to ${VERSION}"
+          git push
