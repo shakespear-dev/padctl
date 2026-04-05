@@ -54,7 +54,7 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dlibusb=false -Dtarget=x86_64-linux-musl
 
       - name: Generate install artifacts
-        run: ./zig-out/bin/padctl install --destdir staging --prefix /usr
+        run: ./zig-out/bin/padctl install --destdir "$PWD/staging" --prefix /usr
 
       - name: Upload install artifacts
         uses: actions/upload-artifact@v4
