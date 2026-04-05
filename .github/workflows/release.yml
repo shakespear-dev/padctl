@@ -116,8 +116,80 @@ jobs:
           name: archive-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
 
+  build-deb:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            deb_arch: amd64
+          - target: aarch64-linux-musl
+            deb_arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+
+      - name: Build .deb
+        env:
+          TAG: ${{ github.ref_name }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          VERSION="${TAG#v}"
+          TARBALL="padctl-${TAG}-${TARGET}.tar.gz"
+          PKG="padctl_${VERSION}_${DEB_ARCH}"
+          DEST="${PWD}/${PKG}"
+
+          tar -xzf "${TARBALL}"
+          SRC="padctl-${TAG}-${TARGET}"
+
+          mkdir -p "${DEST}/DEBIAN"
+          for f in control postinst prerm postrm; do
+            cp "contrib/deb/DEBIAN-BIN/$f" "${DEST}/DEBIAN/$f"
+          done
+          chmod 0644 "${DEST}/DEBIAN/control"
+          chmod 0755 "${DEST}/DEBIAN/postinst" "${DEST}/DEBIAN/prerm" "${DEST}/DEBIAN/postrm"
+          sed -i "s/^Version:.*/Version: ${VERSION}/" "${DEST}/DEBIAN/control"
+          sed -i "s/^Architecture:.*/Architecture: ${DEB_ARCH}/" "${DEST}/DEBIAN/control"
+
+          mkdir -p "${DEST}/usr/bin" "${DEST}/usr/lib/systemd/system" \
+                   "${DEST}/usr/lib/udev/rules.d" "${DEST}/usr/share/padctl" \
+                   "${DEST}/usr/share/doc/padctl"
+
+          for bin in padctl padctl-capture padctl-debug padctl-reconnect; do
+            [ -f "${SRC}/bin/${bin}" ] && install -Dm755 "${SRC}/bin/${bin}" "${DEST}/usr/bin/${bin}"
+          done
+          [ -f "${SRC}/install/padctl-reconnect" ] && install -Dm755 "${SRC}/install/padctl-reconnect" "${DEST}/usr/bin/padctl-reconnect"
+
+          cp "${SRC}/install/"*.service "${DEST}/usr/lib/systemd/system/"
+          cp "${SRC}/install/"*.rules "${DEST}/usr/lib/udev/rules.d/"
+
+          cp -r "${SRC}/devices/"* "${DEST}/usr/share/padctl/"
+          install -Dm644 "${SRC}/LICENSE" "${DEST}/usr/share/doc/padctl/copyright"
+
+          dpkg-deb --build --root-owner-group "${DEST}" "${PKG}.deb"
+          echo "DEB=${PKG}.deb" >> "$GITHUB_ENV"
+
+      - name: Upload .deb
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${TAG}" "${{ env.DEB }}" --clobber
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.deb_arch }}
+          path: ${{ env.DEB }}
+
   checksums:
-    needs: build
+    needs: [build, build-deb]
     runs-on: ubuntu-latest
 
     steps:
@@ -127,8 +199,14 @@ jobs:
           pattern: archive-*
           merge-multiple: true
 
+      - name: Download debs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+
       - name: Generate SHA256SUMS.txt
-        run: sha256sum padctl-*.tar.gz > SHA256SUMS.txt
+        run: sha256sum padctl-*.tar.gz padctl_*.deb > SHA256SUMS.txt
 
       - name: Upload checksums
         env:
