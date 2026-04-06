@@ -330,11 +330,31 @@ test "control_socket: ControlSocket: init returns AlreadyRunning when daemon is 
         if (err == error.AccessDenied) return;
         return err;
     };
+    defer cs.deinit();
 
     try testing.expectError(error.AlreadyRunning, ControlSocket.init(allocator, socket_path));
+}
+
+test "control_socket: ControlSocket: init succeeds after previous daemon exits" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+
+    const socket_path = try std.fs.path.join(allocator, &.{ root, "stale.sock" });
+    defer allocator.free(socket_path);
+
+    {
+        var cs = ControlSocket.init(allocator, socket_path) catch |err| {
+            if (err == error.AccessDenied) return;
+            return err;
+        };
+        cs.deinit();
+    }
 
     // After daemon exits, next init must succeed (stale socket cleaned up)
-    cs.deinit();
     var cs2 = ControlSocket.init(allocator, socket_path) catch |err| {
         if (err == error.AccessDenied) return;
         return err;
