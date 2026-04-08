@@ -23,9 +23,11 @@ const AdaptiveTriggerConfig = @import("config/mapping.zig").AdaptiveTriggerConfi
 const MappingConfig = @import("config/mapping.zig").MappingConfig;
 const wasm_runtime = @import("wasm/runtime.zig");
 pub const WasmPlugin = wasm_runtime.WasmPlugin;
+const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
+const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 
-// signalfd(0) + stop_pipe(1) + per-interface fds + uinput FF fd + timerfd slot
-pub const MAX_FDS = 10;
+// signalfd(0) + stop_pipe(1) + macro timerfd(2) + rumble_stop_fd(3) + per-interface fds + uinput FF fd
+pub const MAX_FDS = 11;
 
 const signalfd_siginfo_size = 128;
 
@@ -38,6 +40,23 @@ pub const TimerCallback = struct {
     }
 };
 
+/// Returns the current CLOCK_MONOTONIC time in nanoseconds.
+///
+/// Scheduler deadlines and timerfd arm paths use this in preference to
+/// `std.time.nanoTimestamp()` because Zig 0.15's nanoTimestamp is backed
+/// by CLOCK_REALTIME on Linux. Since padctl's timerfds are created with
+/// CLOCK_MONOTONIC, mixing clock sources would cause auto-stop deadlines
+/// to fire early, late, or disappear whenever wall time jumps (NTP slew,
+/// suspend/resume, manual clock set). CLOCK_MONOTONIC matches the
+/// timerfd clock and is immune to wall-time discontinuities.
+///
+/// clock_gettime(.MONOTONIC) cannot fail on any supported Linux kernel,
+/// but we defensively coerce any error to 0 rather than propagating.
+pub fn monotonicNs() i128 {
+    const ts = posix.clock_gettime(.MONOTONIC) catch return 0;
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
 /// Arm a timerfd for a one-shot timeout (it_interval = 0).
 pub fn armTimer(fd: posix.fd_t, timeout_ms: u32) void {
     const spec = linux.itimerspec{
@@ -48,6 +67,70 @@ pub fn armTimer(fd: posix.fd_t, timeout_ms: u32) void {
         .it_interval = .{ .sec = 0, .nsec = 0 },
     };
     _ = linux.timerfd_settime(fd, .{}, &spec, null);
+}
+
+/// Arm or disarm the rumble auto-stop timerfd using an absolute
+/// CLOCK_MONOTONIC deadline. `deadline_ns == null` → disarm.
+///
+/// Uses `TFD_TIMER.ABSTIME` so the kernel handles the delta against its
+/// own monotonic clock. No caller-side "now" read is needed, and there
+/// is no opportunity for the arm delta to be computed against a
+/// different clock than the one the timerfd fires against.
+fn armRumbleStopFd(fd: posix.fd_t, deadline_ns: ?i128) void {
+    const target = deadline_ns orelse {
+        disarmTimer(fd);
+        return;
+    };
+    // Guard: ABSTIME with it_value.{sec,nsec} == 0 would disarm the
+    // timer. A deadline in the past (or exactly 0) should still fire
+    // ASAP, so clamp to 1ns.
+    const target_clamped: i128 = if (target > 0) target else 1;
+    const spec = linux.itimerspec{
+        .it_value = .{
+            .sec = @intCast(@divFloor(target_clamped, std.time.ns_per_s)),
+            .nsec = @intCast(@mod(target_clamped, std.time.ns_per_s)),
+        },
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+    };
+    _ = linux.timerfd_settime(fd, .{ .ABSTIME = true }, &spec, null);
+}
+
+/// Returns true when this device's config wants userspace rumble auto-stop.
+/// Defaults to true when `[output.force_feedback]` is absent or does not
+/// explicitly set `auto_stop`.
+fn autoStopEnabled(dcfg: ?*const DeviceConfig) bool {
+    const cfg = dcfg orelse return true;
+    const out = cfg.output orelse return true;
+    const ff = out.force_feedback orelse return true;
+    return ff.auto_stop;
+}
+
+/// Write a single rumble frame (strong, weak) to the HID device using the
+/// device's `commands.rumble` (or alternate FF type) template. Used by
+/// both the uinput-FF-event path and the userspace auto-stop timerfd path.
+fn emitRumbleFrame(
+    devices: []DeviceIO,
+    alloc: std.mem.Allocator,
+    dcfg: *const DeviceConfig,
+    strong: u16,
+    weak: u16,
+) void {
+    const cmds = dcfg.commands orelse return;
+    const ff_type = if (dcfg.output) |out|
+        if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble"
+    else
+        "rumble";
+    const cmd = cmds.map.get(ff_type) orelse return;
+    const iface_idx = resolveIfaceIdx(dcfg, cmd.interface) orelse return;
+    if (iface_idx >= devices.len) return;
+    const params = [_]Param{
+        .{ .name = "strong", .value = strong },
+        .{ .name = "weak", .value = weak },
+    };
+    const bytes = fillTemplate(alloc, cmd.template, &params) catch return;
+    defer alloc.free(bytes);
+    if (cmd.checksum) |*cs| applyChecksum(bytes, cs);
+    devices[iface_idx].write(bytes) catch {};
 }
 
 /// Disarm a timerfd by setting all fields to zero.
@@ -152,6 +235,15 @@ pub const EventLoop = struct {
     // device fds start at slot 2 (after signalfd + stop_pipe)
     device_base: usize,
     timer_fd: posix.fd_t,
+    /// Dedicated timerfd for userspace rumble auto-stop. Separate from
+    /// `timer_fd` (which is reserved for macro timing) to keep the two
+    /// concerns from stomping on each other's arm/disarm schedule.
+    rumble_stop_fd: posix.fd_t,
+    /// pollfds slot where `rumble_stop_fd` is registered.
+    rumble_stop_slot: usize,
+    /// State machine that tracks per-effect deadlines and decides when
+    /// to fire a stop frame. See src/core/rumble_scheduler.zig.
+    rumble_scheduler: RumbleScheduler,
     uinput_ff_slot: ?usize,
     disconnected: bool,
     running: bool,
@@ -192,6 +284,9 @@ pub const EventLoop = struct {
         const timer_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
         errdefer posix.close(timer_fd);
 
+        const rumble_stop_fd = try posix.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+        errdefer posix.close(rumble_stop_fd);
+
         var loop = EventLoop{
             .pollfds = undefined,
             .fd_count = 0,
@@ -200,20 +295,25 @@ pub const EventLoop = struct {
             .stop_w = stop_w,
             .device_base = 0,
             .timer_fd = timer_fd,
+            .rumble_stop_fd = rumble_stop_fd,
+            .rumble_stop_slot = 3,
+            .rumble_scheduler = .{},
             .uinput_ff_slot = null,
             .disconnected = false,
             .running = false,
             .gamepad_state = .{},
-            .last_ts = std.time.nanoTimestamp(),
+            .last_ts = monotonicNs(),
             .last_rumble_ns = 0,
         };
 
-        // slot 0 = signalfd (or dummy pipe), slot 1 = stop pipe, slot 2 = timerfd
+        // slot 0 = signalfd, slot 1 = stop pipe, slot 2 = macro timerfd,
+        // slot 3 = rumble-stop timerfd
         loop.pollfds[0] = .{ .fd = sig_fd, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[1] = .{ .fd = stop_r, .events = posix.POLL.IN, .revents = 0 };
         loop.pollfds[2] = .{ .fd = timer_fd, .events = posix.POLL.IN, .revents = 0 };
-        loop.fd_count = 3;
-        loop.device_base = 3;
+        loop.pollfds[3] = .{ .fd = rumble_stop_fd, .events = posix.POLL.IN, .revents = 0 };
+        loop.fd_count = 4;
+        loop.device_base = 4;
 
         return loop;
     }
@@ -262,7 +362,7 @@ pub const EventLoop = struct {
                 },
             };
 
-            const now = std.time.nanoTimestamp();
+            const now = monotonicNs();
             const dt_ns = now - self.last_ts;
             const dt_ms: u32 = @intCast(@min(100, @max(1, @divFloor(dt_ns, 1_000_000))));
             self.last_ts = now;
@@ -293,38 +393,82 @@ pub const EventLoop = struct {
                 }
             }
 
-            // Check uinput FF fd
+            // Check rumble auto-stop timerfd (slot 3).
+            // When the scheduler's earliest pending deadline fires, clear
+            // expired slots and emit a single stop frame to HID if no
+            // effects remain playing. Rearm (or disarm) for the next
+            // deadline.
+            if (self.pollfds[3].revents & posix.POLL.IN != 0) {
+                var rs_expiry: [8]u8 = undefined;
+                _ = posix.read(self.rumble_stop_fd, &rs_expiry) catch {};
+                const now_ns = monotonicNs();
+                const result = self.rumble_scheduler.onTimerExpired(now_ns);
+                if (result.emit_stop_frame) {
+                    if (ctx.allocator) |alloc| {
+                        if (ctx.device_config) |dcfg| {
+                            emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
+                        }
+                    }
+                }
+                armRumbleStopFd(self.rumble_stop_fd, result.next_deadline_ns);
+            }
+
+            // Check uinput FF fd.
+            //
+            // Play and stop events take different paths because overlapping
+            // effects change the stop semantics: an explicit stop for one of
+            // several still-playing effects must NOT write a zero frame to
+            // HID — otherwise the long effect's motor gets cut off while the
+            // scheduler still considers it live.
             if (self.uinput_ff_slot) |slot| {
                 if (self.pollfds[slot].revents & posix.POLL.IN != 0) {
                     if (ctx.output.pollFf() catch null) |ff_ev| {
-                        const now_ns = std.time.nanoTimestamp();
+                        const now_ns = monotonicNs();
                         const min_interval_ns: i128 = 10_000_000; // 10ms
                         const is_stop = ff_ev.strong == 0 and ff_ev.weak == 0;
-                        if (is_stop or now_ns - self.last_rumble_ns >= min_interval_ns) {
-                            if (ctx.allocator) |alloc| {
-                                if (ctx.device_config) |dcfg| {
-                                    if (dcfg.commands) |cmds| {
-                                        const ff_type = if (dcfg.output) |out| if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble" else "rumble";
-                                        if (cmds.map.get(ff_type)) |cmd| {
-                                            if (resolveIfaceIdx(dcfg, cmd.interface)) |iface_idx| {
-                                                if (iface_idx < ctx.devices.len) {
-                                                    const params = [_]Param{
-                                                        .{ .name = "strong", .value = ff_ev.strong },
-                                                        .{ .name = "weak", .value = ff_ev.weak },
-                                                    };
-                                                    if (fillTemplate(alloc, cmd.template, &params)) |bytes| {
-                                                        defer alloc.free(bytes);
-                                                        if (cmd.checksum) |*cs| {
-                                                            applyChecksum(bytes, cs);
-                                                        }
-                                                        ctx.devices[iface_idx].write(bytes) catch {};
-                                                        if (!is_stop) self.last_rumble_ns = now_ns;
-                                                    } else |_| {}
-                                                }
-                                            }
+                        const scheduler_on = autoStopEnabled(ctx.device_config);
+
+                        if (is_stop) {
+                            if (scheduler_on) {
+                                // Update scheduler first. Only emit a zero
+                                // frame when the stop transitions the whole
+                                // scheduler to "nothing playing"; otherwise
+                                // another effect is still live.
+                                const result = self.rumble_scheduler.onStop(ff_ev.effect_id);
+                                if (result.emit_stop_frame) {
+                                    if (ctx.allocator) |alloc| {
+                                        if (ctx.device_config) |dcfg| {
+                                            emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
                                         }
                                     }
                                 }
+                                armRumbleStopFd(self.rumble_stop_fd, result.next_deadline_ns);
+                            } else {
+                                // auto_stop disabled: legacy fall-through,
+                                // trust the client to know what it's doing.
+                                if (ctx.allocator) |alloc| {
+                                    if (ctx.device_config) |dcfg| {
+                                        emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Play event: throttle applies to play frames.
+                            if (now_ns - self.last_rumble_ns >= min_interval_ns) {
+                                if (ctx.allocator) |alloc| {
+                                    if (ctx.device_config) |dcfg| {
+                                        emitRumbleFrame(ctx.devices, alloc, dcfg, ff_ev.strong, ff_ev.weak);
+                                        self.last_rumble_ns = now_ns;
+                                    }
+                                }
+                            }
+                            if (scheduler_on) {
+                                const next_dl = self.rumble_scheduler.onPlay(
+                                    ff_ev.effect_id,
+                                    ff_ev.duration_ms,
+                                    now_ns,
+                                );
+                                armRumbleStopFd(self.rumble_stop_fd, next_dl);
                             }
                         }
                     }
@@ -436,6 +580,7 @@ pub const EventLoop = struct {
         posix.close(self.stop_r);
         posix.close(self.stop_w);
         posix.close(self.timer_fd);
+        posix.close(self.rumble_stop_fd);
     }
 };
 
@@ -444,6 +589,30 @@ pub const EventLoop = struct {
 const testing = std.testing;
 const MockDeviceIO = @import("test/mock_device_io.zig").MockDeviceIO;
 const uinput = @import("io/uinput.zig");
+
+test "event_loop: monotonicNs is backed by CLOCK_MONOTONIC (not wall clock)" {
+    // All scheduler deadlines and timerfd arm computations MUST come from
+    // CLOCK_MONOTONIC so NTP slews, suspend/resume, and manual wall-clock
+    // adjustments cannot make auto-stop deadlines fire early, late, or be
+    // lost entirely. Zig 0.15's std.time.nanoTimestamp() returns
+    // CLOCK_REALTIME on Linux, so padctl uses this local monotonicNs()
+    // helper instead. This test pins the implementation.
+    const a = monotonicNs();
+    const ts = try posix.clock_gettime(.MONOTONIC);
+    const mono: i128 = @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+
+    // Our helper and a direct clock_gettime(.MONOTONIC) read must agree
+    // within a generous 10ms window (test execution overhead + scheduler
+    // jitter). Anything beyond that means monotonicNs is reading a
+    // different clock.
+    const diff: i128 = if (a > mono) a - mono else mono - a;
+    try testing.expect(diff < 10 * std.time.ns_per_ms);
+
+    // Must be strictly positive and monotonically non-decreasing.
+    try testing.expect(a > 0);
+    const b = monotonicNs();
+    try testing.expect(b >= a);
+}
 
 test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     var loop = try EventLoop.initManaged();
@@ -454,9 +623,11 @@ test "event_loop: EventLoop.addUinputFf registers fd and increments fd_count" {
     defer posix.close(pfds[1]);
 
     try loop.addUinputFf(pfds[0]);
-    try testing.expectEqual(@as(usize, 4), loop.fd_count);
-    try testing.expectEqual(@as(?usize, 3), loop.uinput_ff_slot);
-    try testing.expectEqual(pfds[0], loop.pollfds[3].fd);
+    // Fixed slots 0..3 are signalfd, stop_pipe, macro timerfd, rumble_stop_fd;
+    // the FF fd becomes slot 4, fd_count goes 4 → 5.
+    try testing.expectEqual(@as(usize, 5), loop.fd_count);
+    try testing.expectEqual(@as(?usize, 4), loop.uinput_ff_slot);
+    try testing.expectEqual(pfds[0], loop.pollfds[4].fd);
 }
 
 test "event_loop: EventLoop: Disconnected device causes loop to exit without panic" {
@@ -515,13 +686,15 @@ test "event_loop: EventLoop: Disconnected device causes loop to exit without pan
     try testing.expect(!loop.running);
 }
 
-test "event_loop: EventLoop.initManaged creates eventfd and timerfd" {
+test "event_loop: EventLoop.initManaged creates eventfd and timerfds" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
     try testing.expect(loop.signal_fd >= 0);
     try testing.expect(loop.timer_fd >= 0);
-    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = timerfd
-    try testing.expectEqual(@as(usize, 3), loop.fd_count);
+    try testing.expect(loop.rumble_stop_fd >= 0);
+    // slot 0 = eventfd, slot 1 = stop_pipe, slot 2 = macro timerfd,
+    // slot 3 = rumble-stop timerfd
+    try testing.expectEqual(@as(usize, 4), loop.fd_count);
 }
 
 test "event_loop: EventLoop.stop wakes ppoll" {
@@ -543,9 +716,10 @@ test "event_loop: EventLoop.addDevice registers fd" {
     const dev = mock.deviceIO();
 
     try loop.addDevice(dev);
-    // fd_count goes from 3 → 4, device is at slot 3
-    try testing.expectEqual(@as(usize, 4), loop.fd_count);
-    try testing.expectEqual(mock.pipe_r, loop.pollfds[3].fd);
+    // Fixed slots: 0=signalfd, 1=stop_pipe, 2=macro timerfd, 3=rumble_stop_fd.
+    // First device lands at slot 4, fd_count goes from 4 → 5.
+    try testing.expectEqual(@as(usize, 5), loop.fd_count);
+    try testing.expectEqual(mock.pipe_r, loop.pollfds[4].fd);
 }
 
 test "event_loop: EventLoop.addDevice rejects overflow" {
@@ -553,14 +727,15 @@ test "event_loop: EventLoop.addDevice rejects overflow" {
     var loop = try EventLoop.initManaged();
     defer loop.deinit();
 
-    // Fill remaining slots (already have 3: signalfd + stop_pipe + timerfd)
-    var mocks: [MAX_FDS - 3]MockDeviceIO = undefined;
-    for (0..MAX_FDS - 3) |i| {
+    // Fill remaining slots (already have 4: signalfd + stop_pipe + macro
+    // timerfd + rumble-stop timerfd).
+    var mocks: [MAX_FDS - 4]MockDeviceIO = undefined;
+    for (0..MAX_FDS - 4) |i| {
         mocks[i] = try MockDeviceIO.init(allocator, &.{});
     }
-    defer for (0..MAX_FDS - 3) |i| mocks[i].deinit();
+    defer for (0..MAX_FDS - 4) |i| mocks[i].deinit();
 
-    for (0..MAX_FDS - 3) |i| {
+    for (0..MAX_FDS - 4) |i| {
         const dev = mocks[i].deviceIO();
         try loop.addDevice(dev);
     }
@@ -1032,6 +1207,44 @@ const MockFfOutputSeq = struct {
     fn mockClose(_: *anyopaque) void {}
 };
 
+/// Drain-aware variant of MockFfOutputSeq. Each `mockPollFf` call reads one
+/// byte from the test's ff_pipe before returning the next event. That forces
+/// a strict 1:1 correspondence between pipe writes and event consumption so
+/// real-time delays between pipe writes are respected — which matters when a
+/// test wants its second play frame to land AFTER the 10ms play-frame
+/// throttle window closes.
+const MockFfOutputDrain = struct {
+    events: []const ?uinput.FfEvent,
+    call_count: usize = 0,
+    pipe_read: posix.fd_t,
+
+    fn outputDevice(self: *MockFfOutputDrain) uinput.OutputDevice {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = uinput.OutputDevice.VTable{
+        .emit = mockEmit,
+        .poll_ff = mockPollFf,
+        .close = mockClose,
+    };
+
+    fn mockEmit(_: *anyopaque, _: state.GamepadState) uinput.EmitError!void {}
+
+    fn mockPollFf(ptr: *anyopaque) uinput.PollFfError!?uinput.FfEvent {
+        const self: *MockFfOutputDrain = @ptrCast(@alignCast(ptr));
+        var buf: [1]u8 = undefined;
+        _ = posix.read(self.pipe_read, &buf) catch return null;
+        if (self.call_count < self.events.len) {
+            const ev = self.events[self.call_count];
+            self.call_count += 1;
+            return ev;
+        }
+        return null;
+    }
+
+    fn mockClose(_: *anyopaque) void {}
+};
+
 test "event_loop: stop frame forwarded even within 10ms throttle window" {
     const allocator = testing.allocator;
 
@@ -1102,6 +1315,338 @@ test "event_loop: stop frame forwarded even within 10ms throttle window" {
     const play_frame = mock_dev.write_log.items[0..frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
     // Entry 1: stop frame
+    const stop_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
+}
+
+const ff_toml_no_autostop =
+    \\[device]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[[device.interface]]
+    \\id = 0
+    \\class = "hid"
+    \\[[report]]
+    \\name = "r"
+    \\interface = 0
+    \\size = 1
+    \\[commands.rumble]
+    \\interface = 0
+    \\template = "00 08 00 {strong:u8} {weak:u8} 00 00 00"
+    \\[output]
+    \\name = "T"
+    \\vid = 1
+    \\pid = 2
+    \\[output.axes]
+    \\left_x = { code = "ABS_X", min = -32768, max = 32767 }
+    \\[output.force_feedback]
+    \\type = "rumble"
+    \\auto_stop = false
+;
+
+test "event_loop: explicit stop of one of two overlapping effects does not cut the long effect" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // Sequence:
+    //   1) play A (slot 0, 300ms duration, magnitude 0x8000/0x4000)
+    //   2) play B (slot 1, 100ms duration, magnitude 0x4000/0x2000)
+    //   3) explicit stop B (slot 1)
+    //
+    // Use the drain-aware mock so each pipe write advances the mock by
+    // exactly one event and the test's wall-clock sleeps actually gate
+    // the 10ms play-frame throttle.
+    //
+    // Expected: three HID frames — play A, play B, then ONE stop frame
+    // when A's 300ms auto-stop deadline fires. No stop frame from the
+    // explicit stop of B, because A was still live.
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 300 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0x4000, .weak = 0x2000, .duration_ms = 100 },
+        .{ .effect_type = 0x50, .effect_id = 1, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var ff_out = MockFfOutputDrain{ .events = &seq, .pipe_read = ff_pipe[0] };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputDrain,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 500 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    // play A — scheduler arms at t+300ms
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(15 * std.time.ns_per_ms); // clear the 10ms play throttle
+    // play B — scheduler still has A pending; next earliest deadline is
+    // min(300, 15+100) = 115ms.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(15 * std.time.ns_per_ms);
+    // explicit stop B — A is still active; scheduler must NOT emit a stop.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    // Wait for A's 300ms auto-stop deadline to fire.
+    std.Thread.sleep(350 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Expect exactly 3 frames: play A, play B, auto-stop.
+    // The explicit stop of B must NOT have produced a zero frame while A
+    // was still playing.
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 3 * frame_size), mock_dev.write_log.items.len);
+    const play_a = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_a);
+    const play_b = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x40, 0x20, 0x00, 0x00, 0x00 }, play_b);
+    const final_stop = mock_dev.write_log.items[2 * frame_size .. 3 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, final_stop);
+}
+
+test "event_loop: auto_stop=false never emits a scheduler-driven stop frame" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml_no_autostop);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // Single play with a short duration. Because the device opted out,
+    // the scheduler must NOT arm the timerfd and NOT emit an auto-stop
+    // frame — only the play frame from the pollFf path should land.
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 25 },
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    // Wait well past the 25ms duration to prove no auto-stop fires.
+    std.Thread.sleep(80 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Only the play frame; NO stop frame because auto_stop = false.
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, frame_size), mock_dev.write_log.items.len);
+    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
+}
+
+test "event_loop: explicit stop before duration_ms disarms auto-stop (no double stop)" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // Play with a long (200ms) duration, followed by an explicit stop a few
+    // ms later. The scheduler must cancel the 200ms auto-stop deadline so
+    // that only one stop frame (the explicit one) hits HID — not a second
+    // redundant stop from the timer firing later.
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 200 },
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0, .weak = 0, .duration_ms = 0 },
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 300 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    // First wake: play event → scheduler arms at t+200ms.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+    // Second wake: explicit stop → scheduler disarms.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    // Wait well past the original 200ms to prove the timer never fires.
+    std.Thread.sleep(260 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Exactly 2 frames: play + stop. No third stop from the (disarmed) timer.
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
+    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
+    const stop_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
+}
+
+test "event_loop: rumble auto-stop emits stop frame after duration_ms elapses" {
+    const allocator = testing.allocator;
+
+    var loop = try EventLoop.initManaged();
+    defer loop.deinit();
+
+    var mock_dev = try MockDeviceIO.init(allocator, &.{});
+    defer mock_dev.deinit();
+    const dev = mock_dev.deviceIO();
+    try loop.addDevice(dev);
+
+    const ff_pipe = try posix.pipe2(.{ .NONBLOCK = true });
+    defer posix.close(ff_pipe[0]);
+    defer posix.close(ff_pipe[1]);
+    try loop.addUinputFf(ff_pipe[0]);
+
+    const parsed = try device_mod.parseString(allocator, ff_toml);
+    defer parsed.deinit();
+    const interp = Interpreter.init(&parsed.value);
+
+    // Single play event with a short finite duration (25ms).
+    // The client deliberately does NOT send an explicit stop — matching
+    // what Steam/SDL does when relying on the kernel's ff-memless auto-stop
+    // for real controllers. padctl must emit its own stop frame.
+    const seq = [_]?uinput.FfEvent{
+        .{ .effect_type = 0x50, .effect_id = 0, .strong = 0x8000, .weak = 0x4000, .duration_ms = 25 },
+        null,
+    };
+    var ff_out = MockFfOutputSeq{ .allocator = allocator, .events = &seq };
+
+    const RunCtx = struct {
+        loop: *EventLoop,
+        devs: []DeviceIO,
+        interp: *const Interpreter,
+        ff_out: *MockFfOutputSeq,
+        cfg: *const device_mod.DeviceConfig,
+        alloc: std.mem.Allocator,
+    };
+    var devs = [_]DeviceIO{dev};
+    var ctx = RunCtx{
+        .loop = &loop,
+        .devs = &devs,
+        .interp = &interp,
+        .ff_out = &ff_out,
+        .cfg = &parsed.value,
+        .alloc = allocator,
+    };
+
+    const T = struct {
+        fn run(c: *RunCtx) !void {
+            try c.loop.run(.{ .devices = c.devs, .interpreter = c.interp, .output = c.ff_out.outputDevice(), .allocator = c.alloc, .device_config = c.cfg, .poll_timeout_ms = 100 });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, T.run, .{&ctx});
+
+    // Wake the loop so pollFf delivers the play event. The scheduler should
+    // then arm rumble_stop_fd at t+25ms. No more FF events are sent.
+    _ = try posix.write(ff_pipe[1], &[_]u8{1});
+    // Wait long enough for the 25ms deadline to fire plus scheduling slack.
+    std.Thread.sleep(80 * std.time.ns_per_ms);
+    loop.stop();
+    thread.join();
+
+    // Template: "00 08 00 {strong:u8} {weak:u8} 00 00 00" → 8-byte frame
+    const frame_size = 8;
+    try testing.expectEqual(@as(usize, 2 * frame_size), mock_dev.write_log.items.len);
+    const play_frame = mock_dev.write_log.items[0..frame_size];
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x80, 0x40, 0x00, 0x00, 0x00 }, play_frame);
     const stop_frame = mock_dev.write_log.items[frame_size .. 2 * frame_size];
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, stop_frame);
 }

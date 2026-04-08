@@ -45,12 +45,26 @@ fn ioctlPtr(fd: std.posix.fd_t, request: u32, ptr: usize) !void {
     };
 }
 
-pub const FfEffect = struct { strong: u16 = 0, weak: u16 = 0 };
+pub const FfEffect = struct {
+    strong: u16 = 0,
+    weak: u16 = 0,
+    /// Effect replay length in milliseconds. 0 means infinite (no auto-stop).
+    /// Populated from `ff_effect.replay.length` during UI_FF_UPLOAD so the
+    /// event loop can drive the userspace rumble auto-stop scheduler.
+    length_ms: u16 = 0,
+};
 
 pub const FfEvent = struct {
     effect_type: u16,
     strong: u16,
     weak: u16,
+    /// FF effect id (slot, 0..15) the event refers to. Defaults to 0 for
+    /// legacy call sites that do not set it explicitly.
+    effect_id: u8 = 0,
+    /// Effect duration in milliseconds from `ff_effect.replay.length`.
+    /// 0 means infinite (or unknown) — the rumble auto-stop scheduler
+    /// treats it as "no auto-stop, wait for explicit stop".
+    duration_ms: u16 = 0,
 };
 
 pub const EmitError = error{ WriteFailed, DeviceGone };
@@ -367,6 +381,7 @@ pub const UinputDevice = struct {
                         self.ff_effects[@intCast(upload.effect.id)] = .{
                             .strong = upload.effect.u.rumble.strong_magnitude,
                             .weak = upload.effect.u.rumble.weak_magnitude,
+                            .length_ms = @intCast(upload.effect.replay.length),
                         };
                     }
                     upload.retval = 0;
@@ -383,11 +398,28 @@ pub const UinputDevice = struct {
                 }
             } else if (ev.type == c.EV_FF) {
                 const id: usize = @intCast(ev.code);
-                if (ev.value == 0 or id >= 16) {
-                    result = FfEvent{ .effect_type = c.FF_RUMBLE, .strong = 0, .weak = 0 };
+                // Out-of-range FF effect ids must be silently dropped.
+                // Collapsing them into a zero FfEvent would look like
+                // an explicit stop for slot 0 downstream, which would
+                // spuriously cancel the real rumble auto-stop deadline.
+                if (id >= 16) continue;
+                if (ev.value == 0) {
+                    result = FfEvent{
+                        .effect_type = c.FF_RUMBLE,
+                        .effect_id = @intCast(id),
+                        .strong = 0,
+                        .weak = 0,
+                        .duration_ms = 0,
+                    };
                 } else {
                     const eff = self.ff_effects[id];
-                    result = FfEvent{ .effect_type = c.FF_RUMBLE, .strong = eff.strong, .weak = eff.weak };
+                    result = FfEvent{
+                        .effect_type = c.FF_RUMBLE,
+                        .effect_id = @intCast(id),
+                        .strong = eff.strong,
+                        .weak = eff.weak,
+                        .duration_ms = eff.length_ms,
+                    };
                 }
             }
         }
@@ -1078,6 +1110,27 @@ test "uinput: pollFf play: returns stored ff_effects values" {
     try std.testing.expectEqual(@as(u16, 0x8000), result.?.weak);
 }
 
+test "uinput: pollFf play: carries effect_id and duration_ms for scheduler" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    // Simulate an upload with a 500ms finite duration on slot 3.
+    dev.ff_effects[3] = .{ .strong = 0x4000, .weak = 0x2000, .length_ms = 500 };
+
+    const ev = c.input_event{ .type = c.EV_FF, .code = 3, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+
+    const result = try dev.pollFf();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u8, 3), result.?.effect_id);
+    try std.testing.expectEqual(@as(u16, 500), result.?.duration_ms);
+}
+
 test "uinput: pollFf play stop (value=0): returns zeros" {
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
@@ -1098,7 +1151,36 @@ test "uinput: pollFf play stop (value=0): returns zeros" {
     try std.testing.expectEqual(@as(u16, 0), result.?.weak);
 }
 
-test "uinput: pollFf play: id >= 16 returns zeros (no panic)" {
+test "uinput: pollFf stop: carries effect_id from EV_FF code, duration_ms=0" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    // Slot had a finite duration; explicit stop must NOT report that duration
+    // (it's a stop, not a play) but MUST report the right effect_id so the
+    // event loop can clear the matching scheduler slot.
+    dev.ff_effects[4] = .{ .strong = 0x1111, .weak = 0x2222, .length_ms = 750 };
+
+    const ev = c.input_event{ .type = c.EV_FF, .code = 4, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
+
+    const result = try dev.pollFf();
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u8, 4), result.?.effect_id);
+    try std.testing.expectEqual(@as(u16, 0), result.?.duration_ms);
+    try std.testing.expectEqual(@as(u16, 0), result.?.strong);
+    try std.testing.expectEqual(@as(u16, 0), result.?.weak);
+}
+
+test "uinput: pollFf: out-of-range EV_FF code is dropped (returns null)" {
+    // A malformed or unexpected EV_FF event with code >= MAX_EFFECTS (16)
+    // must be silently dropped rather than collapsed into a bogus
+    // FfEvent{effect_id=0, strong=0, weak=0}. The latter would trigger
+    // the downstream scheduler to spuriously stop the real slot 0 effect.
     const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
     defer std.posix.close(pfds[0]);
     defer std.posix.close(pfds[1]);
@@ -1112,9 +1194,34 @@ test "uinput: pollFf play: id >= 16 returns zeros (no panic)" {
     _ = try std.posix.write(pfds[1], std.mem.asBytes(&ev));
 
     const result = try dev.pollFf();
+    try std.testing.expectEqual(@as(?FfEvent, null), result);
+}
+
+test "uinput: pollFf: out-of-range id does not shadow a preceding valid play event" {
+    // If a valid play event for a real slot arrives in the same drain batch
+    // as an out-of-range id, the valid event must be the one returned —
+    // previously the out-of-range event overwrote `result` with zeros.
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    dev.ff_effects[2] = .{ .strong = 0xaaaa, .weak = 0x5555, .length_ms = 200 };
+
+    const valid = c.input_event{ .type = c.EV_FF, .code = 2, .value = 1, .time = std.mem.zeroes(c.timeval) };
+    const garbage = c.input_event{ .type = c.EV_FF, .code = 42, .value = 0, .time = std.mem.zeroes(c.timeval) };
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&valid));
+    _ = try std.posix.write(pfds[1], std.mem.asBytes(&garbage));
+
+    const result = try dev.pollFf();
     try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(u16, 0), result.?.strong);
-    try std.testing.expectEqual(@as(u16, 0), result.?.weak);
+    try std.testing.expectEqual(@as(u8, 2), result.?.effect_id);
+    try std.testing.expectEqual(@as(u16, 0xaaaa), result.?.strong);
+    try std.testing.expectEqual(@as(u16, 0x5555), result.?.weak);
+    try std.testing.expectEqual(@as(u16, 200), result.?.duration_ms);
 }
 
 test "uinput: ff_effects: erase clears slot" {
@@ -1148,6 +1255,23 @@ test "uinput: ff_effects: upload stores strong and weak" {
     try std.testing.expectEqual(@as(u16, 0x5678), dev.ff_effects[5].weak);
     // Other slots unaffected
     try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[0].strong);
+}
+
+test "uinput: ff_effects: slot carries length_ms for auto-stop scheduling" {
+    const pfds = try std.posix.pipe2(.{ .NONBLOCK = true });
+    defer std.posix.close(pfds[0]);
+    defer std.posix.close(pfds[1]);
+
+    var dev = UinputDevice{
+        .fd = pfds[0],
+        .button_codes = [_]u16{0} ** BUTTON_COUNT,
+    };
+    // Default initialization must leave length_ms at zero (infinite / unknown).
+    try std.testing.expectEqual(@as(u16, 0), dev.ff_effects[7].length_ms);
+
+    // An upload writing a finite duration must populate length_ms verbatim.
+    dev.ff_effects[7] = .{ .strong = 0, .weak = 0, .length_ms = 500 };
+    try std.testing.expectEqual(@as(u16, 500), dev.ff_effects[7].length_ms);
 }
 
 test "uinput: stateFieldForAxis: known axes return correct fields" {

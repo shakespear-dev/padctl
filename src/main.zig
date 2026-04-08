@@ -54,6 +54,7 @@ pub const core = struct {
     pub const macro = @import("core/macro.zig");
     pub const timer_queue = @import("core/timer_queue.zig");
     pub const macro_player = @import("core/macro_player.zig");
+    pub const rumble_scheduler = @import("core/rumble_scheduler.zig");
 };
 
 pub const io = struct {
@@ -744,6 +745,7 @@ pub fn main() !void {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("core/rumble_scheduler.zig");
     _ = @import("test/bugfix_regression_test.zig");
     _ = @import("test/properties/config_props.zig");
     _ = @import("test/properties/contract_props.zig");
