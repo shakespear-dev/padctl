@@ -582,11 +582,15 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
                         mapping_failed = true;
                     };
                 } else {
-                    _ = std.posix.write(std.posix.STDERR_FILENO, "warning: no device config found for mapping '") catch {};
+                    _ = std.posix.write(std.posix.STDERR_FILENO, "error: no device config found for mapping '") catch {};
                     _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
-                    _ = std.posix.write(std.posix.STDERR_FILENO, "', skipping binding\n") catch {};
+                    _ = std.posix.write(std.posix.STDERR_FILENO, "', binding not written\n") catch {};
+                    mapping_failed = true;
                 }
             }
+        } else {
+            _ = std.posix.write(std.posix.STDERR_FILENO, "error: devices directory not found, cannot resolve device bindings\n") catch {};
+            mapping_failed = true;
         }
     }
 

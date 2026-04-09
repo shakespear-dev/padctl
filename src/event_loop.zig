@@ -108,29 +108,32 @@ fn autoStopEnabled(dcfg: ?*const DeviceConfig) bool {
 /// Write a single rumble frame (strong, weak) to the HID device using the
 /// device's `commands.rumble` (or alternate FF type) template. Used by
 /// both the uinput-FF-event path and the userspace auto-stop timerfd path.
+/// Returns true if the frame was successfully written to HID. Callers
+/// must only advance scheduler/throttle state when this returns true.
 fn emitRumbleFrame(
     devices: []DeviceIO,
     alloc: std.mem.Allocator,
     dcfg: *const DeviceConfig,
     strong: u16,
     weak: u16,
-) void {
-    const cmds = dcfg.commands orelse return;
+) bool {
+    const cmds = dcfg.commands orelse return false;
     const ff_type = if (dcfg.output) |out|
         if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble"
     else
         "rumble";
-    const cmd = cmds.map.get(ff_type) orelse return;
-    const iface_idx = resolveIfaceIdx(dcfg, cmd.interface) orelse return;
-    if (iface_idx >= devices.len) return;
+    const cmd = cmds.map.get(ff_type) orelse return false;
+    const iface_idx = resolveIfaceIdx(dcfg, cmd.interface) orelse return false;
+    if (iface_idx >= devices.len) return false;
     const params = [_]Param{
         .{ .name = "strong", .value = strong },
         .{ .name = "weak", .value = weak },
     };
-    const bytes = fillTemplate(alloc, cmd.template, &params) catch return;
+    const bytes = fillTemplate(alloc, cmd.template, &params) catch return false;
     defer alloc.free(bytes);
     if (cmd.checksum) |*cs| applyChecksum(bytes, cs);
-    devices[iface_idx].write(bytes) catch {};
+    devices[iface_idx].write(bytes) catch return false;
+    return true;
 }
 
 /// Disarm a timerfd by setting all fields to zero.
@@ -406,7 +409,7 @@ pub const EventLoop = struct {
                 if (result.emit_stop_frame) {
                     if (ctx.allocator) |alloc| {
                         if (ctx.device_config) |dcfg| {
-                            emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
+                            _ = emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
                         }
                     }
                 }
@@ -438,7 +441,7 @@ pub const EventLoop = struct {
                                 if (result.emit_stop_frame) {
                                     if (ctx.allocator) |alloc| {
                                         if (ctx.device_config) |dcfg| {
-                                            emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
+                                            _ = emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
                                         }
                                     }
                                 }
@@ -448,7 +451,7 @@ pub const EventLoop = struct {
                                 // trust the client to know what it's doing.
                                 if (ctx.allocator) |alloc| {
                                     if (ctx.device_config) |dcfg| {
-                                        emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
+                                        _ = emitRumbleFrame(ctx.devices, alloc, dcfg, 0, 0);
                                     }
                                 }
                             }
@@ -463,9 +466,10 @@ pub const EventLoop = struct {
                             if (now_ns - self.last_rumble_ns >= min_interval_ns) {
                                 if (ctx.allocator) |alloc| {
                                     if (ctx.device_config) |dcfg| {
-                                        emitRumbleFrame(ctx.devices, alloc, dcfg, ff_ev.strong, ff_ev.weak);
-                                        self.last_rumble_ns = now_ns;
-                                        forwarded = true;
+                                        if (emitRumbleFrame(ctx.devices, alloc, dcfg, ff_ev.strong, ff_ev.weak)) {
+                                            self.last_rumble_ns = now_ns;
+                                            forwarded = true;
+                                        }
                                     }
                                 }
                             }

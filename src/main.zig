@@ -337,6 +337,10 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     std.log.err("unknown switch argument: {s}", .{sub_arg});
                     return error.UnknownArgument;
                 } else {
+                    if (name != null) {
+                        std.log.err("switch accepts at most one mapping name", .{});
+                        return error.UnknownArgument;
+                    }
                     name = sub_arg;
                 }
             }
@@ -941,7 +945,13 @@ fn runSudoCopy(src: []const u8, dst: []const u8, err_writer: anytype) bool {
         err_writer.writeAll("error: sudo cp failed\n") catch {};
         return false;
     };
-    if (result.Exited != 0) {
+    // child.wait() returns a tagged union — accessing .Exited directly
+    // panics in safe builds if the process was killed by a signal.
+    const ok = switch (result) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+    if (!ok) {
         err_writer.writeAll("error: sudo cp returned non-zero\n") catch {};
         return false;
     }
@@ -959,7 +969,10 @@ fn runSudoMkdir(dir: []const u8, err_writer: anytype) bool {
         err_writer.writeAll("error: sudo mkdir failed\n") catch {};
         return false;
     };
-    return result.Exited == 0;
+    return switch (result) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Write a config.toml with a single device binding. Reads existing file
