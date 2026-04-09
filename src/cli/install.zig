@@ -43,6 +43,10 @@ pub const InstallOptions = struct {
     no_immutable: bool = false,
     mappings: []const []const u8 = &.{},
     force_mapping: bool = false,
+    /// When true, overwrite existing device→mapping bindings in
+    /// /etc/padctl/config.toml (with timestamped backup). Separate from
+    /// --force-mapping which controls mapping file overwrites.
+    force_binding: bool = false,
     no_enable: bool = false,
     no_start: bool = false,
 };
@@ -553,6 +557,38 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         }
     }
 
+    // 4e. Write device→mapping bindings to /etc/padctl/config.toml so the
+    //      daemon auto-applies the mapping at boot without a manual
+    //      `padctl switch`. For each mapping, resolve the device name by
+    //      filename matching against the source devices/ tree.
+    if (opts.mappings.len > 0) {
+        const devices_src = findDevicesSourceDir(allocator, self_dir, null) catch null;
+        defer if (devices_src) |path| allocator.free(path);
+        if (devices_src) |dev_dir| {
+            for (opts.mappings) |mapping_name| {
+                const device_name = findDeviceNameForMapping(allocator, mapping_name, dev_dir) catch null;
+                defer if (device_name) |n| allocator.free(n);
+                if (device_name) |name| {
+                    const mode: ConflictMode = if (opts.force_binding)
+                        .force
+                    else if (std.posix.isatty(std.posix.STDIN_FILENO))
+                        .interactive
+                    else
+                        .skip;
+                    writeBinding(allocator, destdir, name, mapping_name, mode, stdinPrompt) catch |err| {
+                        var errbuf: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&errbuf, "warning: could not write binding for \"{s}\": {}\n", .{ mapping_name, err }) catch "warning: binding write failed\n";
+                        _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+                    };
+                } else {
+                    _ = std.posix.write(std.posix.STDERR_FILENO, "warning: no device config found for mapping '") catch {};
+                    _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
+                    _ = std.posix.write(std.posix.STDERR_FILENO, "', skipping binding\n") catch {};
+                }
+            }
+        }
+    }
+
     // 5. Reload system daemons and enable/start services (only when not staging)
     if (destdir.len == 0) {
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\nReloading system daemons...\n") catch {};
@@ -905,6 +941,252 @@ fn isFieldKey(line: []const u8, key: []const u8) bool {
 /// Parse a TOML inline array of strings, e.g. `["xpad", "hid_generic"]`
 /// Validate that a string is a safe identifier (alphanumeric, underscore, hyphen).
 /// Prevents command injection when interpolated into udev RUN+= shell commands.
+const user_config_mod = @import("../config/user_config.zig");
+const config_device = @import("../config/device.zig");
+
+/// Walk `devices_dir` (e.g. `/path/to/padctl/devices`) looking for
+/// `*/mapping_name.toml`. If exactly one match is found, parse it and
+/// return `device.name`. Returns null if zero matches are found. Logs an
+/// error and returns null if multiple matches are found (traversal-order-
+/// dependent behavior would silently persist the wrong binding).
+/// Caller owns the returned string.
+fn findDeviceNameForMapping(
+    allocator: std.mem.Allocator,
+    mapping_name: []const u8,
+    devices_dir: []const u8,
+) !?[]const u8 {
+    var dir = std.fs.cwd().openDir(devices_dir, .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    var match_path: ?[]u8 = null;
+    defer if (match_path) |p| allocator.free(p);
+    var match_count: usize = 0;
+
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".toml")) continue;
+
+        const stem = entry.basename[0 .. entry.basename.len - 5];
+        if (!std.mem.eql(u8, stem, mapping_name)) continue;
+
+        match_count += 1;
+        if (match_count == 1) {
+            match_path = try allocator.dupe(u8, entry.path);
+        } else {
+            // Multiple matches — log both paths for disambiguation.
+            _ = std.posix.write(std.posix.STDERR_FILENO, "error: multiple device configs match mapping '") catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, mapping_name) catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, "', skipping binding\n") catch {};
+            return null;
+        }
+    }
+
+    if (match_count == 0 or match_path == null) return null;
+
+    // Exactly one match — parse and extract device.name.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const full_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ devices_dir, match_path.? });
+    const parsed = config_device.parseFile(allocator, full_path) catch return null;
+    defer parsed.deinit();
+    return try allocator.dupe(u8, parsed.value.device.name);
+}
+
+pub const ConflictMode = enum {
+    skip, // non-TTY default: warn and keep existing
+    force, // --force-binding: backup + overwrite
+    interactive, // TTY: prompt user (keep/overwrite/abort)
+};
+
+pub const PromptResult = enum { keep, overwrite, abort };
+
+/// Function type for the interactive conflict prompt. Receives the
+/// config file path, device name, existing mapping, and proposed mapping.
+/// Real callers use `stdinPrompt`; tests inject a mock.
+pub const PromptFn = *const fn (
+    config_path: []const u8,
+    device_name: []const u8,
+    existing_map: []const u8,
+    proposed_map: []const u8,
+) PromptResult;
+
+pub fn stdinPrompt(
+    config_path: []const u8,
+    device_name: []const u8,
+    existing_map: []const u8,
+    proposed_map: []const u8,
+) PromptResult {
+    _ = std.posix.write(std.posix.STDERR_FILENO, "\nConflict: ") catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, config_path) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, "\n  existing: \"") catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, device_name) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, "\" -> \"") catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, existing_map) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, "\"\n  proposed: \"") catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, device_name) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, "\" -> \"") catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, proposed_map) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, "\"\n  [k]eep existing / [o]verwrite with backup / [a]bort (default: k): ") catch {};
+
+    var buf: [16]u8 = undefined;
+    const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch 0;
+    const choice: u8 = if (n > 0) buf[0] else 'k';
+    return switch (choice) {
+        'o', 'O' => .overwrite,
+        'a', 'A' => .abort,
+        else => .keep,
+    };
+}
+
+/// Write (or update) a device→mapping binding in `{destdir}/etc/padctl/config.toml`.
+///
+/// If the file doesn't exist, creates it with `version = 1` and a single `[[device]]`
+/// entry. If it exists and already has a binding for `device_name`:
+///   - Same `default_mapping` → no-op (idempotent).
+///   - `conflict_mode == .force` → backup + overwrite.
+///   - `conflict_mode == .interactive` → prompt user at stdin (keep/overwrite/abort).
+///   - `conflict_mode == .skip` → log warning, keep existing (non-destructive default).
+///
+/// Other `[[device]]` entries in the file are preserved. The version field is
+/// carried forward (or set to CURRENT_VERSION if absent).
+fn writeBinding(
+    allocator: std.mem.Allocator,
+    destdir: []const u8,
+    device_name: []const u8,
+    mapping_name: []const u8,
+    conflict_mode: ConflictMode,
+    prompt_fn: PromptFn,
+) !void {
+    const etc_dir = try std.fmt.allocPrint(allocator, "{s}/etc/padctl", .{destdir});
+    defer allocator.free(etc_dir);
+    try ensureDirAll(allocator, etc_dir);
+
+    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.toml", .{etc_dir});
+    defer allocator.free(config_path);
+
+    // Try to read + parse existing config.
+    // MalformedConfig must NOT be swallowed — a broken hand-edited
+    // /etc/padctl/config.toml must surface as an error, not be silently
+    // overwritten (which would drop unrelated bindings with no backup).
+    var existing = user_config_mod.loadFromDir(allocator, etc_dir) catch |err| switch (err) {
+        error.MalformedConfig => {
+            _ = std.posix.write(std.posix.STDERR_FILENO, "error: ") catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, config_path) catch {};
+            _ = std.posix.write(std.posix.STDERR_FILENO, " is malformed — fix or remove it before installing bindings\n") catch {};
+            return error.MalformedConfig;
+        },
+    };
+    defer if (existing) |*e| e.deinit();
+
+    const version: i64 = if (existing) |e| e.value.version orelse user_config_mod.CURRENT_VERSION else user_config_mod.CURRENT_VERSION;
+    const devices = if (existing) |e| e.value.device else null;
+
+    // Check for conflict with an existing binding for the same device name.
+    if (devices) |devs| {
+        for (devs) |d| {
+            if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
+                // Same mapping → idempotent no-op.
+                if (d.default_mapping) |m| {
+                    if (std.mem.eql(u8, m, mapping_name)) return;
+                }
+                // Conflict: different mapping (or no mapping) for the same device.
+                const existing_map = d.default_mapping orelse "(none)";
+                switch (conflict_mode) {
+                    .skip => {
+                        std.log.warn("binding conflict: {s} already has \"{s}\" -> \"{s}\". Use --force-binding to overwrite.", .{ config_path, device_name, existing_map });
+                        return;
+                    },
+                    .interactive => {
+                        switch (prompt_fn(config_path, device_name, existing_map, mapping_name)) {
+                            .overwrite => {}, // fall through to backup + overwrite
+                            .abort => return error.Aborted,
+                            .keep => return,
+                        }
+                    },
+                    .force => {}, // fall through to backup + overwrite
+                }
+                break;
+            }
+        }
+    }
+
+    // Backup existing file before overwriting (only when file exists AND we're
+    // actually changing content — skipped for no-ops and fresh writes).
+    // Abort the overwrite if backup creation fails — losing the user's
+    // recovery file while mutating /etc is not acceptable.
+    if (existing != null and (conflict_mode == .force or conflict_mode == .interactive)) {
+        backupFile(allocator, config_path) catch |err| {
+            var errbuf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&errbuf, "error: cannot create backup of {s}: {}, aborting overwrite\n", .{ config_path, err }) catch "error: backup failed, aborting\n";
+            _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+            return err;
+        };
+    }
+
+    // Serialize: version + all existing entries (replacing the conflict target
+    // if one was found) + new entry if none matched.
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.print("version = {d}\n", .{version});
+
+    var wrote_target = false;
+    if (devices) |devs| {
+        for (devs) |d| {
+            if (std.ascii.eqlIgnoreCase(d.name, device_name)) {
+                // Replace this entry with the new mapping.
+                try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+                wrote_target = true;
+            } else {
+                // Preserve unrelated entry.
+                try w.print("\n[[device]]\nname = \"{s}\"\n", .{d.name});
+                if (d.default_mapping) |m| {
+                    try w.print("default_mapping = \"{s}\"\n", .{m});
+                }
+            }
+        }
+    }
+    if (!wrote_target) {
+        try w.print("\n[[device]]\nname = \"{s}\"\ndefault_mapping = \"{s}\"\n", .{ device_name, mapping_name });
+    }
+
+    // Write the file.
+    var f = try std.fs.createFileAbsolute(config_path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(buf.items);
+}
+
+/// Copy `path` to `path.bak.YYYYMMDD-HHMMSS`. Returns an error if the
+/// backup cannot be created — the caller must abort the overwrite.
+fn backupFile(allocator: std.mem.Allocator, file_path: []const u8) !void {
+    const now = std.time.timestamp();
+    const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(now) };
+    const day = epoch_secs.getEpochDay().calculateYearDay();
+    const year_day = day.calculateMonthDay();
+    const day_secs = epoch_secs.getDaySeconds();
+    const year: u16 = day.year;
+    const month: u8 = @intFromEnum(year_day.month);
+    const dom: u8 = year_day.day_index + 1;
+    const hours: u8 = @intCast(day_secs.getHoursIntoDay());
+    const minutes: u8 = @intCast(day_secs.getMinutesIntoHour());
+    const seconds: u8 = @intCast(day_secs.getSecondsIntoMinute());
+
+    const bak_path = try std.fmt.allocPrint(allocator, "{s}.bak.{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}", .{
+        file_path, year, month, dom, hours, minutes, seconds,
+    });
+    defer allocator.free(bak_path);
+
+    const data = try std.fs.cwd().readFileAlloc(allocator, file_path, 256 * 1024);
+    defer allocator.free(data);
+    var f = try std.fs.createFileAbsolute(bak_path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(data);
+
+    std.log.info("backup: {s}", .{bak_path});
+}
+
 fn isValidIdentifier(s: []const u8) bool {
     if (s.len == 0) return false;
     for (s) |c| {
@@ -1802,6 +2084,294 @@ test "install: installMapping overwrites with force" {
     const content = try f.readToEndAlloc(allocator, 4096);
     defer allocator.free(content);
     try testing.expectEqualStrings("updated", content);
+}
+
+test "install: findDeviceNameForMapping resolves vader5 to Flydigi Vader 5 Pro" {
+    const testing_alloc = std.testing.allocator;
+    // findDevicesSourceDir searches relative to self_dir or CWD.
+    // In the test environment, CWD is the repo root.
+    const cwd = try std.process.getCwdAlloc(testing_alloc);
+    defer testing_alloc.free(cwd);
+    const devices_dir = try std.fmt.allocPrint(testing_alloc, "{s}/devices", .{cwd});
+    defer testing_alloc.free(devices_dir);
+
+    const result = try findDeviceNameForMapping(testing_alloc, "vader5", devices_dir);
+    defer if (result) |r| testing_alloc.free(r);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("Flydigi Vader 5 Pro", result.?);
+}
+
+test "install: findDeviceNameForMapping returns null for nonexistent mapping" {
+    const testing_alloc = std.testing.allocator;
+    const cwd = try std.process.getCwdAlloc(testing_alloc);
+    defer testing_alloc.free(cwd);
+    const devices_dir = try std.fmt.allocPrint(testing_alloc, "{s}/devices", .{cwd});
+    defer testing_alloc.free(devices_dir);
+
+    const result = try findDeviceNameForMapping(testing_alloc, "nonexistent_controller_xyz", devices_dir);
+    try std.testing.expectEqual(@as(?[]const u8, null), result);
+}
+
+// --- Mock prompt functions for tests ---
+
+fn mockPromptKeep(_: []const u8, _: []const u8, _: []const u8, _: []const u8) PromptResult {
+    return .keep;
+}
+fn mockPromptOverwrite(_: []const u8, _: []const u8, _: []const u8, _: []const u8) PromptResult {
+    return .overwrite;
+}
+fn mockPromptAbort(_: []const u8, _: []const u8, _: []const u8, _: []const u8) PromptResult {
+    return .abort;
+}
+
+// --- Binding writer tests ---
+
+test "install: writeBinding creates new config.toml with version and device entry" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Test Device", "test_map", .skip, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "version = 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "name = \"Test Device\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"test_map\"") != null);
+}
+
+test "install: writeBinding appends to existing config with different device" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    // Write first device.
+    try writeBinding(testing_alloc, destdir, "Device A", "map_a", .skip, mockPromptKeep);
+    // Write second device.
+    try writeBinding(testing_alloc, destdir, "Device B", "map_b", .skip, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // Both devices present.
+    try std.testing.expect(std.mem.indexOf(u8, content, "name = \"Device A\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "name = \"Device B\"") != null);
+}
+
+test "install: writeBinding is idempotent when device+mapping match" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Vader", "vader5", .skip, mockPromptKeep);
+    try writeBinding(testing_alloc, destdir, "Vader", "vader5", .skip, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // Only one [[device]] entry (not duplicated).
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, content, pos, "[[device]]")) |idx| {
+        count += 1;
+        pos = idx + 10;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "install: writeBinding conflict without force - skip (no overwrite)" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Vader", "old_map", .skip, mockPromptKeep);
+    // Conflict: same device, different mapping, no force.
+    try writeBinding(testing_alloc, destdir, "Vader", "new_map", .skip, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // Original mapping preserved (no force).
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"old_map\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"new_map\"") == null);
+}
+
+test "install: writeBinding interactive keep preserves existing binding" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Vader", "old_map", .skip, mockPromptKeep);
+    // Interactive mode with mockPromptKeep → user chose "keep".
+    try writeBinding(testing_alloc, destdir, "Vader", "new_map", .interactive, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // Original binding preserved.
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"old_map\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"new_map\"") == null);
+}
+
+test "install: writeBinding interactive overwrite updates binding with backup" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Vader", "old_map", .skip, mockPromptKeep);
+    // Interactive mode with mockPromptOverwrite → user chose "overwrite".
+    try writeBinding(testing_alloc, destdir, "Vader", "new_map", .interactive, mockPromptOverwrite);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // Binding updated.
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"new_map\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"old_map\"") == null);
+
+    // Backup exists.
+    const etc_dir = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl", .{destdir});
+    defer testing_alloc.free(etc_dir);
+    var dir = try std.fs.openDirAbsolute(etc_dir, .{ .iterate = true });
+    defer dir.close();
+    var found_bak = false;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "config.toml.bak.")) {
+            found_bak = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_bak);
+}
+
+test "install: writeBinding interactive abort returns error" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Vader", "old_map", .skip, mockPromptKeep);
+    // Interactive mode with mockPromptAbort → user chose "abort".
+    try std.testing.expectError(
+        error.Aborted,
+        writeBinding(testing_alloc, destdir, "Vader", "new_map", .interactive, mockPromptAbort),
+    );
+
+    // Original preserved (abort didn't modify).
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"old_map\"") != null);
+}
+
+test "install: writeBinding aborts on malformed existing config.toml" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    // Create a malformed config.toml that the TOML parser can't read.
+    const etc_dir = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl", .{destdir});
+    defer testing_alloc.free(etc_dir);
+    try ensureDirAll(testing_alloc, etc_dir);
+    {
+        const cfg_path = try std.fmt.allocPrint(testing_alloc, "{s}/config.toml", .{etc_dir});
+        defer testing_alloc.free(cfg_path);
+        const f = try std.fs.createFileAbsolute(cfg_path, .{});
+        defer f.close();
+        try f.writeAll("this is {{{{ not valid TOML !!!!");
+    }
+
+    // writeBinding must refuse to overwrite — data loss risk.
+    try std.testing.expectError(
+        error.MalformedConfig,
+        writeBinding(testing_alloc, destdir, "Device", "map", .skip, mockPromptKeep),
+    );
+    // Force mode must also abort — backup-then-overwrite is meaningless
+    // when we can't even parse the file to preserve unrelated entries.
+    try std.testing.expectError(
+        error.MalformedConfig,
+        writeBinding(testing_alloc, destdir, "Device", "map", .force, mockPromptKeep),
+    );
+}
+
+test "install: writeBinding conflict with force - backup + overwrite" {
+    const testing_alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const destdir = try tmp.dir.realpathAlloc(testing_alloc, ".");
+    defer testing_alloc.free(destdir);
+
+    try writeBinding(testing_alloc, destdir, "Vader", "old_map", .skip, mockPromptKeep);
+    // Force overwrite.
+    try writeBinding(testing_alloc, destdir, "Vader", "new_map", .force, mockPromptKeep);
+
+    const config_path = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl/config.toml", .{destdir});
+    defer testing_alloc.free(config_path);
+
+    const content = try std.fs.cwd().readFileAlloc(testing_alloc, config_path, 64 * 1024);
+    defer testing_alloc.free(content);
+
+    // Binding updated.
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"new_map\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "default_mapping = \"old_map\"") == null);
+
+    // Backup file exists.
+    const etc_dir = try std.fmt.allocPrint(testing_alloc, "{s}/etc/padctl", .{destdir});
+    defer testing_alloc.free(etc_dir);
+    var dir = try std.fs.openDirAbsolute(etc_dir, .{ .iterate = true });
+    defer dir.close();
+    var found_bak = false;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "config.toml.bak.")) {
+            found_bak = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_bak);
 }
 
 test "install: installMapping errors on missing source" {

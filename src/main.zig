@@ -202,6 +202,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Cli {
                     try mapping_list.append(allocator, args.next() orelse return error.MissingArgValue);
                 } else if (std.mem.eql(u8, iarg, "--force-mapping")) {
                     opts.force_mapping = true;
+                } else if (std.mem.eql(u8, iarg, "--force-binding")) {
+                    opts.force_binding = true;
                 } else if (std.mem.eql(u8, iarg, "--no-enable")) {
                     opts.no_enable = true;
                 } else if (std.mem.eql(u8, iarg, "--no-start")) {
@@ -387,6 +389,7 @@ fn printHelp() void {
         \\    --no-immutable      Force standard install even on detected immutable OS
         \\    --mapping <name>    Install a mapping config to /etc/padctl/mappings/ (repeatable)
         \\    --force-mapping     Overwrite existing mapping files
+        \\    --force-binding     Overwrite device bindings in /etc/padctl/config.toml
         \\    --no-enable         Skip systemctl enable
         \\    --no-start          Skip systemctl start
         \\  uninstall             Remove installed files, stop and disable service
