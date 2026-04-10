@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  repo-path     Path to padctl repo (default: auto-detect or ~/Games/padctl)"
-            echo "  --mapping     Mapping config to install (default: prompt interactively)"
+            echo "  --mapping     Mapping config to install and auto-apply on boot (default: prompt)"
             echo "  --branch, -b  Git branch to clone/checkout (default: repo default branch)"
             echo "  --repo-url    Git repo URL (default: BANANASJIM/padctl)"
             exit 0
@@ -197,19 +197,20 @@ if $IS_IMMUTABLE; then
     install_args+=(--immutable)
 fi
 if [[ -n "$MAPPING" ]]; then
-    install_args+=(--mapping "$MAPPING" --force-mapping)
+    install_args+=(--mapping "$MAPPING" --force-mapping --force-binding)
 fi
 sudo ./zig-out/bin/padctl "${install_args[@]}"
 ok "padctl installed to $PREFIX"
 
-# --- 7b. Apply mapping (daemon starts in passthrough mode, needs explicit switch) ---
+# --- 7b. Apply mapping to the running daemon (config.toml persists for future boots,
+#         but the already-running daemon needs an explicit switch for the current session) ---
 if [[ -n "$MAPPING" ]]; then
     info "Waiting for daemon to initialize..."
     sleep 3
     if "$PREFIX/bin/padctl" switch "$MAPPING" --socket /run/padctl/padctl.sock 2>/dev/null; then
-        ok "Mapping applied: $MAPPING"
+        ok "Mapping applied: $MAPPING (persisted for future boots via /etc/padctl/config.toml)"
     else
-        warn "Could not apply mapping (daemon may not be ready yet). Run manually: padctl switch $MAPPING"
+        warn "Could not apply mapping to running daemon (it will auto-apply on next boot). Run manually: padctl switch $MAPPING"
     fi
 fi
 
@@ -257,6 +258,15 @@ done
 # Check mapping
 if [[ -n "$MAPPING" && -f "/etc/padctl/mappings/${MAPPING}.toml" ]]; then
     ok "Mapping: /etc/padctl/mappings/${MAPPING}.toml"
+fi
+
+# Check device→mapping binding (auto-apply on boot)
+if [[ -n "$MAPPING" && -f "/etc/padctl/config.toml" ]]; then
+    if grep -q "default_mapping.*=.*\"${MAPPING}\"" /etc/padctl/config.toml 2>/dev/null; then
+        ok "Binding: /etc/padctl/config.toml → $MAPPING (auto-applies on boot)"
+    else
+        warn "Binding: /etc/padctl/config.toml exists but does not bind to $MAPPING"
+    fi
 fi
 
 echo ""

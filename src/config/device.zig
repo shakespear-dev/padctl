@@ -105,6 +105,13 @@ pub const DpadOutputConfig = struct {
 pub const FfConfig = struct {
     type: []const u8, // "rumble"
     max_effects: ?i64 = null,
+    /// When true (default), padctl runs a userspace rumble auto-stop
+    /// scheduler that emits a stop frame after each effect's replay.length
+    /// elapses. Set to false to delegate stopping to the client (e.g. Steam)
+    /// for devices whose firmware auto-stops internally. Most uinput-backed
+    /// devices need this enabled because the kernel's ff-memless auto-stop
+    /// helper is not used by uinput.
+    auto_stop: bool = true,
 };
 
 pub const AuxConfig = struct {
@@ -431,6 +438,60 @@ test "device: load flydigi/vader5.toml succeeds" {
     try std.testing.expectEqual(@as(i64, 0x2401), cfg.device.pid);
     try std.testing.expectEqual(@as(usize, 1), cfg.report.len);
     try std.testing.expectEqualStrings("extended", cfg.report[0].name);
+}
+
+test "device: force_feedback.auto_stop defaults to true when unspecified" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator, test_toml);
+    defer result.deinit();
+
+    // The test TOML declares [output.force_feedback] type = "rumble" without
+    // auto_stop. The default must be true (userspace rumble auto-stop enabled).
+    const ff = result.value.output.?.force_feedback.?;
+    try std.testing.expect(ff.auto_stop);
+}
+
+test "device: force_feedback.auto_stop = false parses to disabled scheduler" {
+    const allocator = std.testing.allocator;
+    const toml_with_opt_out =
+        \\[device]
+        \\name = "Test Opt-Out"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[[device.interface]]
+        \\id = 0
+        \\class = "hid"
+        \\
+        \\[[report]]
+        \\name = "main"
+        \\interface = 0
+        \\size = 16
+        \\
+        \\[report.match]
+        \\offset = 0
+        \\expect = [0x00]
+        \\
+        \\[report.fields]
+        \\left_x = { offset = 6, type = "i16le" }
+        \\
+        \\[output]
+        \\name = "Test"
+        \\vid = 0x1234
+        \\pid = 0x5678
+        \\
+        \\[output.axes]
+        \\left_x = { code = "ABS_X", min = -32768, max = 32767 }
+        \\
+        \\[output.force_feedback]
+        \\type = "rumble"
+        \\auto_stop = false
+    ;
+    const result = try parseString(allocator, toml_with_opt_out);
+    defer result.deinit();
+
+    const ff = result.value.output.?.force_feedback.?;
+    try std.testing.expect(!ff.auto_stop);
 }
 
 test "device: valid config parses and validates" {

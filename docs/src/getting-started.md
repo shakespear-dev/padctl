@@ -67,7 +67,9 @@ To install a mapping config to `/etc/padctl/mappings/` during install:
 sudo ./zig-out/bin/padctl install --mapping vader5
 ```
 
-The `--mapping` flag is repeatable. Use `--force-mapping` to overwrite existing mappings.
+The `--mapping` flag is repeatable. Use `--force-mapping` to overwrite existing mapping files.
+
+When `--mapping` is given, the installer also writes a device-to-mapping binding in `/etc/padctl/config.toml` so the daemon auto-applies the mapping on every boot. Use `--force-binding` to overwrite an existing binding for the same device.
 
 > **Bazzite / immutable distros:** See the [Bazzite / Immutable Distros guide](immutable-install.md) for special installation steps.
 
@@ -135,20 +137,28 @@ padctl --doc-gen --config devices/sony/dualsense.toml
 
 ## User Config
 
-padctl reads `~/.config/padctl/config.toml` to set per-device defaults:
+padctl reads a config file to set per-device default mappings. The loader checks these paths in order (first found wins):
+
+1. `~/.config/padctl/config.toml` — user overrides (highest priority)
+2. `/etc/padctl/config.toml` — system-wide defaults (written by `padctl install --mapping`)
 
 ```toml
+version = 1
+
 [[device]]
 name = "Flydigi Vader 5 Pro"
 default_mapping = "fps"
 ```
 
-On daemon start, padctl matches the connected device name and loads the named mapping profile automatically from `~/.config/padctl/mappings/fps.toml`.
+On daemon start, padctl matches the connected device name (case-insensitive) and loads the named mapping profile automatically. The system path is the fallback for environments where `HOME` is not set (e.g. systemd services).
+
+`padctl switch <name>` automatically updates the user config, so the choice is remembered for bare `padctl switch` (re-apply without a name). To make the choice survive reboots, use `padctl switch <name> --persist` which copies the mapping and config to `/etc/padctl/` via sudo.
 
 ## CLI Reference
 
 ```sh
-padctl switch <name> [--device <id>]       # switch mapping at runtime
+padctl switch [name] [--device <id>]       # switch mapping (omit name to re-apply from user config)
+padctl switch <name> --persist             # switch + copy to /etc/padctl/ for reboot persistence (sudo)
 padctl status [--socket <path>]            # show daemon status
 padctl devices [--socket <path>]           # list connected devices
 padctl list-mappings [--config-dir <dir>]  # list available mapping profiles
