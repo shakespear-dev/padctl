@@ -200,6 +200,30 @@ fn copyFile(src: []const u8, dst: []const u8) !void {
     }
 }
 
+// Write to {dst}.new then rename(2) over dst — avoids ETXTBSY when dst is currently executing.
+fn atomicInstallBinary(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
+    const tmp = try std.fmt.allocPrint(allocator, "{s}.new", .{dst});
+    defer allocator.free(tmp);
+    var src_file = try std.fs.openFileAbsolute(src, .{});
+    defer src_file.close();
+    var tmp_file = try std.fs.createFileAbsolute(tmp, .{ .truncate = true });
+    errdefer std.fs.deleteFileAbsolute(tmp) catch {};
+    errdefer tmp_file.close();
+    var buf: [65536]u8 = undefined;
+    while (true) {
+        const n = try src_file.read(&buf);
+        if (n == 0) break;
+        try tmp_file.writeAll(buf[0..n]);
+    }
+    try tmp_file.chmod(0o755);
+    try tmp_file.sync();
+    // Rename before close so that on rename failure the errdefer closes the fd
+    // exactly once. Closing after rename is safe on Linux: the fd keeps the old
+    // inode alive until close, independent of the dirent.
+    try std.posix.rename(tmp, dst);
+    tmp_file.close();
+}
+
 fn runCmd(argv: []const []const u8) void {
     var child = std.process.Child.init(argv, std.heap.page_allocator);
     child.stdin_behavior = .Ignore;
@@ -407,8 +431,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
     // 1. Copy binaries
     const bin_padctl = try std.fmt.allocPrint(allocator, "{s}/padctl", .{bin_dir});
     defer allocator.free(bin_padctl);
-    try copyFile(self_path, bin_padctl);
-    try std.posix.fchmodat(std.fs.cwd().fd, bin_padctl, 0o755, 0);
+    try atomicInstallBinary(allocator, self_path, bin_padctl);
     _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, bin_padctl) catch {};
     _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
@@ -418,8 +441,7 @@ pub fn run(allocator: std.mem.Allocator, opts: InstallOptions) !void {
         defer allocator.free(src);
         const dst = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin_dir, name });
         defer allocator.free(dst);
-        copyFile(src, dst) catch continue;
-        std.posix.fchmodat(std.fs.cwd().fd, dst, 0o755, 0) catch {};
+        atomicInstallBinary(allocator, src, dst) catch continue;
         _ = std.posix.write(std.posix.STDOUT_FILENO, "  ") catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, dst) catch {};
         _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
@@ -2588,4 +2610,173 @@ test "install: generateServiceContent non-usr prefix includes --config-dir for i
     defer allocator.free(content);
     try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/local/share/padctl/devices") != null);
     try testing.expect(std.mem.indexOf(u8, content, "--config-dir /usr/share") == null);
+}
+
+test "install: atomicInstallBinary replaces destination atomically" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src.bin", .{dir});
+    defer allocator.free(src_path);
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.bin", .{dir});
+    defer allocator.free(dst_path);
+
+    // Write distinct content to src and an existing dst.
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{});
+        defer f.close();
+        try f.writeAll("new-content");
+    }
+    {
+        var f = try std.fs.createFileAbsolute(dst_path, .{});
+        defer f.close();
+        try f.writeAll("old-content");
+    }
+
+    try atomicInstallBinary(allocator, src_path, dst_path);
+
+    // Destination must now contain source bytes.
+    const got = blk: {
+        var f = try std.fs.openFileAbsolute(dst_path, .{});
+        defer f.close();
+        break :blk try f.readToEndAlloc(allocator, 4096);
+    };
+    defer allocator.free(got);
+    try testing.expectEqualStrings("new-content", got);
+
+    // Mode must be 0o755.
+    const stat = try std.fs.cwd().statFile(dst_path);
+    try testing.expectEqual(@as(u32, 0o755), stat.mode & 0o777);
+}
+
+test "install: atomicInstallBinary rename succeeds while dst has open readers" {
+    // Verifies rename(2) over an open read fd succeeds — regression lock for the atomic-rename path.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src2.bin", .{dir});
+    defer allocator.free(src_path);
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst2.bin", .{dir});
+    defer allocator.free(dst_path);
+
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+    {
+        var f = try std.fs.createFileAbsolute(dst_path, .{});
+        defer f.close();
+        try f.writeAll("old");
+    }
+
+    // Hold dst open for reading while install runs — simulates a running process.
+    var held = try std.fs.openFileAbsolute(dst_path, .{});
+    defer held.close();
+
+    try atomicInstallBinary(allocator, src_path, dst_path);
+
+    const got = blk: {
+        var f = try std.fs.openFileAbsolute(dst_path, .{});
+        defer f.close();
+        break :blk try f.readToEndAlloc(allocator, 4096);
+    };
+    defer allocator.free(got);
+    try testing.expectEqualStrings("payload", got);
+}
+
+// Counts open fds in /proc/self/fd. Used to detect fd leaks in the atomicInstallBinary
+// error paths.
+fn countOpenFds() !usize {
+    var dir = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
+    defer dir.close();
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (try it.next()) |_| n += 1;
+    return n;
+}
+
+test "install: atomicInstallBinary closes tmp fd on copy-loop error" {
+    // Reproducer for the errdefer-close bug: passing a directory as src
+    // lets openFileAbsolute succeed (returns a dirfd), createFileAbsolute
+    // succeeds, then src_file.read() fails with error.IsDir inside the
+    // copy loop. Without errdefer tmp_file.close(), the tmp_file fd leaks.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src_is_dir", .{dir});
+    defer allocator.free(src_dir);
+    try std.fs.makeDirAbsolute(src_dir);
+
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.bin", .{dir});
+    defer allocator.free(dst_path);
+
+    const fds_before = try countOpenFds();
+
+    const result = atomicInstallBinary(allocator, src_dir, dst_path);
+    try testing.expect(std.meta.isError(result));
+
+    const fds_after = try countOpenFds();
+    try testing.expectEqual(fds_before, fds_after);
+
+    // errdefer deleteFileAbsolute must also have cleaned the tmp file.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.new", .{dst_path});
+    defer allocator.free(tmp_path);
+    try testing.expectError(error.FileNotFound, std.fs.accessAbsolute(tmp_path, .{}));
+}
+
+test "install: atomicInstallBinary does not double-close on rename failure" {
+    // Reproducer for the double-close concern: if rename(tmp, dst) fails,
+    // the errdefer tmp_file.close() fires after the explicit close on the
+    // success path has already run. Zig's File.close is NOT idempotent
+    // (it calls posix.close(handle) unconditionally), so a second close
+    // either returns EBADF silently or panics under safety checks.
+    //
+    // Trigger rename failure by making dst an existing non-empty directory:
+    // rename(file, non-empty-dir) fails with ENOTEMPTY or EISDIR.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src.bin", .{dir});
+    defer allocator.free(src_path);
+    {
+        var f = try std.fs.createFileAbsolute(src_path, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+
+    // dst is an existing non-empty directory — rename(file, dir-with-contents) fails.
+    const dst_dir = try std.fmt.allocPrint(allocator, "{s}/dst_is_dir", .{dir});
+    defer allocator.free(dst_dir);
+    try std.fs.makeDirAbsolute(dst_dir);
+    const sentinel = try std.fmt.allocPrint(allocator, "{s}/sentinel", .{dst_dir});
+    defer allocator.free(sentinel);
+    {
+        var f = try std.fs.createFileAbsolute(sentinel, .{});
+        f.close();
+    }
+
+    const fds_before = try countOpenFds();
+
+    const result = atomicInstallBinary(allocator, src_path, dst_dir);
+    try testing.expect(std.meta.isError(result));
+
+    const fds_after = try countOpenFds();
+    try testing.expectEqual(fds_before, fds_after);
 }
