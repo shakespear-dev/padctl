@@ -333,8 +333,8 @@ const null_output_vtable = OutputDevice.VTable{
         fn f(_: *anyopaque, _: GamepadState) uinput.EmitError!void {}
     }.f,
     .poll_ff = struct {
-        fn f(_: *anyopaque) uinput.PollFfError!?FfEvent {
-            return null;
+        fn f(_: *anyopaque) uinput.PollFfError!uinput.FfEventBatch {
+            return .{};
         }
     }.f,
     .close = struct {
