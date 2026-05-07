@@ -20,6 +20,12 @@ const REL_HWHEEL: u16 = c.REL_HWHEEL;
 const remap_mod = @import("remap.zig");
 const gesture_mod = @import("gesture.zig");
 const chord_detector_mod = @import("chord_detector.zig");
+const passthrough = @import("passthrough.zig");
+const dynamic_bind_mod = @import("dynamic_bind.zig");
+const dynamic_bind_chord_mod = @import("dynamic_bind_chord.zig");
+const analog_edge = @import("analog_edge.zig");
+pub const DynamicBindState = dynamic_bind_mod.DynamicBindState;
+pub const DynamicBindChord = dynamic_bind_chord_mod.Detector;
 pub const RemapTargetResolved = remap_mod.RemapTargetResolved;
 pub const resolveTarget = remap_mod.resolveTarget;
 pub const AuxEvent = aux_event_mod.AuxEvent;
@@ -44,6 +50,8 @@ pub const OutputEvents = struct {
     aux: AuxEventList,
     timer_request: ?TimerRequest = null,
     chord_switch_request: ?u8 = null,
+    dynamic_bind_event: ?dynamic_bind_mod.DynamicBindEvent = null,
+    feedback_rumble: ?dynamic_bind_mod.FeedbackRumble = null,
 };
 
 pub const LayerTimerEvents = struct {
@@ -184,6 +192,14 @@ pub const Mapper = struct {
     resolved_layers: []ResolvedRemap,
     // In-controller mapping switch via chord detection. null disables the feature.
     chord_detector: ?ChordDetector = null,
+    // Dynamic-binding state. Allocated in init() when config.dynamic_bind is set.
+    dynamic_bind: ?DynamicBindState = null,
+    dynamic_bind_chord: ?DynamicBindChord = null,
+    /// Tracks whether the runtime-bound analog trigger is currently virtually
+    /// pressed (above threshold for `direction = "above"`, etc.). Persisted
+    /// across frames so hysteresis works — `analog_edge.detect()` returns an
+    /// edge only on transitions, this field carries the level.
+    runtime_analog_active: bool = false,
 
     pub fn init(config: *const MappingConfig, timer_fd: std.posix.fd_t, allocator: std.mem.Allocator) !Mapper {
         const base = if (config.remap) |m| try precomputeRemap(allocator, m) else ResolvedRemap{
@@ -206,6 +222,52 @@ pub const Mapper = struct {
             };
             initialized = i + 1;
         }
+
+        const dyn_bind_chord: ?DynamicBindChord = blk: {
+            const dbc = config.dynamic_bind orelse break :blk null;
+
+            // Validate target_layer exists. Disable feature with a warning if
+            // not — mapping still loads, runtime binding silently inactive.
+            const target_exists = blk2: {
+                const layers_cfg = config.layer orelse break :blk2 false;
+                for (layers_cfg) |lc| {
+                    if (std.mem.eql(u8, lc.name, dbc.target_layer)) break :blk2 true;
+                }
+                break :blk2 false;
+            };
+            if (!target_exists) {
+                std.log.warn("[dynamic_bind] target_layer \"{s}\" does not match any [[layer]] — feature disabled", .{dbc.target_layer});
+                break :blk null;
+            }
+
+            var mod_mask: u64 = 0;
+            for (dbc.modifier) |name| {
+                const id = std.meta.stringToEnum(ButtonId, name) orelse {
+                    std.log.warn("[dynamic_bind] modifier contains unknown button name \"{s}\" — feature disabled", .{name});
+                    break :blk null;
+                };
+                mod_mask |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+            }
+            // Compute blocked_mask: modifier itself plus the target layer's
+            // static trigger (if any). Combos targeting these are rejected at
+            // runtime as self-bindings.
+            var blocked: u64 = mod_mask;
+            if (config.layer) |layers_cfg| {
+                for (layers_cfg) |lc| {
+                    if (!std.mem.eql(u8, lc.name, dbc.target_layer)) continue;
+                    const t = lc.trigger orelse break;
+                    const id = std.meta.stringToEnum(ButtonId, t) orelse break;
+                    blocked |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+                    break;
+                }
+            }
+            const hold_ms_u64: u64 = if (dbc.hold_ms < 0) 0 else @intCast(dbc.hold_ms);
+            break :blk DynamicBindChord.init(.{
+                .modifier_mask = mod_mask,
+                .hold_ns = hold_ms_u64 * std.time.ns_per_ms,
+                .blocked_mask = blocked,
+            });
+        };
 
         return .{
             .config = config,
@@ -234,6 +296,8 @@ pub const Mapper = struct {
             .next_token = 1,
             .resolved_base = base,
             .resolved_layers = resolved_layers,
+            .dynamic_bind = if (config.dynamic_bind != null) DynamicBindState.init() else null,
+            .dynamic_bind_chord = dyn_bind_chord,
         };
     }
 
@@ -361,8 +425,108 @@ pub const Mapper = struct {
         self.applyTriggerThreshold(&self.state);
         self.suppressSeededEdges();
 
+        // [1.6] dynamic-bind analog threshold: when the runtime-bound trigger
+        // is LT/RT and `[dynamic_bind].trigger_threshold` is set, override
+        // the bit synthesized by [1.5] using the dynamic_bind threshold +
+        // hysteresis. This lets the user activate the dynamic layer only on
+        // (e.g.) a hard pull, distinct from the global trigger_threshold.
+        if (self.config.dynamic_bind) |dbc| dyn_analog: {
+            const dyn_state = self.dynamic_bind orelse break :dyn_analog;
+            const runtime_btn = dyn_state.getRuntimeTrigger() orelse break :dyn_analog;
+            const cfg_threshold = dbc.trigger_threshold orelse break :dyn_analog;
+            const cur: u8 = switch (runtime_btn) {
+                .LT => self.state.lt,
+                .RT => self.state.rt,
+                else => break :dyn_analog,
+            };
+            const prv: u8 = switch (runtime_btn) {
+                .LT => self.prev.lt,
+                .RT => self.prev.rt,
+                else => break :dyn_analog,
+            };
+            const dir: analog_edge.Direction = blk: {
+                const s = dbc.trigger_threshold_direction orelse break :blk .above;
+                if (std.mem.eql(u8, s, "below")) break :blk .below;
+                break :blk .above;
+            };
+            const release: u8 = if (dbc.release_threshold) |r| r else switch (dir) {
+                .above => if (cfg_threshold >= 16) cfg_threshold - 16 else 0,
+                .below => if (@as(u16, cfg_threshold) + 16 <= 255) cfg_threshold + 16 else 255,
+            };
+            const edge = analog_edge.detect(.{
+                .prev = prv,
+                .current = cur,
+                .threshold = cfg_threshold,
+                .direction = dir,
+                .release_threshold = release,
+            });
+            switch (edge) {
+                .press => self.runtime_analog_active = true,
+                .release => self.runtime_analog_active = false,
+                .none => {},
+            }
+            const bit = @as(u64, 1) << @intCast(@intFromEnum(runtime_btn));
+            if (self.runtime_analog_active) {
+                self.state.buttons |= bit;
+            } else {
+                self.state.buttons &= ~bit;
+            }
+        }
+
+        // [2] layer trigger processing.
         const configs = self.config.layer orelse &.{};
-        const action = self.layer.processLayerTriggers(configs, self.state.buttons, self.prev.buttons, now_ns);
+
+        // Run the dynamic-binding chord detector before evaluating layer
+        // triggers so a successful bind updates the runtime trigger this same
+        // frame. The detector's `suppress_mask` is stashed and applied after
+        // the suppressed_buttons reset further down.
+        var dyn_suppress: u64 = 0;
+        var dyn_event: ?dynamic_bind_mod.DynamicBindEvent = null;
+        var dyn_rumble: ?dynamic_bind_mod.FeedbackRumble = null;
+        if (self.dynamic_bind_chord) |*det| {
+            const cd_now: u64 = @intCast(@max(now_ns, 0));
+
+            // Augment buttons for chord detection: LT/RT need to appear as
+            // digital "pressed" so they're discoverable as bind targets
+            // even when the user has no top-level `trigger_threshold` set
+            // and nothing is yet bound (so [1.6] hasn't synthesized them
+            // either). Use a small noise threshold (~12%) to ignore ADC
+            // jitter at rest. The augmentation is local to the chord
+            // detector — it does NOT propagate to the layer system.
+            const ANALOG_BIND_THRESHOLD: u8 = 32;
+            const lt_bit_const = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.LT));
+            const rt_bit_const = @as(u64, 1) << @intCast(@intFromEnum(ButtonId.RT));
+            var chord_buttons = self.state.buttons;
+            var chord_prev = self.prev.buttons;
+            if (self.state.lt > ANALOG_BIND_THRESHOLD) chord_buttons |= lt_bit_const;
+            if (self.state.rt > ANALOG_BIND_THRESHOLD) chord_buttons |= rt_bit_const;
+            if (self.prev.lt > ANALOG_BIND_THRESHOLD) chord_prev |= lt_bit_const;
+            if (self.prev.rt > ANALOG_BIND_THRESHOLD) chord_prev |= rt_bit_const;
+
+            const r = det.step(chord_buttons, chord_prev, cd_now);
+            dyn_suppress = r.suppress_mask;
+            if (r.fired_button) |btn| {
+                if (self.dynamic_bind) |*dyn_state| {
+                    const action = dyn_state.processChordEvent(btn, r.was_self_bind);
+                    if (self.config.dynamic_bind) |dbc| {
+                        dyn_event = .{
+                            .action = action,
+                            .layer_name = dbc.target_layer,
+                            .button = btn,
+                        };
+                        dyn_rumble = dynamic_bind_mod.rumbleForAction(action);
+                    }
+                }
+            }
+        }
+
+        const runtime: ?layer.RuntimeBinding = blk: {
+            const dyn = &(self.dynamic_bind orelse break :blk null);
+            const button = dyn.getRuntimeTrigger() orelse break :blk null;
+            const target = (self.config.dynamic_bind orelse break :blk null).target_layer;
+            break :blk layer.RuntimeBinding{ .layer_name = target, .button = button };
+        };
+        const action = self.layer.processLayerTriggersWithRuntime(configs, self.state.buttons, self.prev.buttons, now_ns, runtime);
         var timer_request: ?TimerRequest = null;
         if (action.arm_timer_ms) |ms| {
             timer_request = .{ .arm = @intCast(ms) };
@@ -393,11 +557,17 @@ pub const Mapper = struct {
             self.gesture_timer_tap_pending = 0;
         }
 
-        // Suppress layer trigger buttons so they don't leak to uinput output.
-        // Trigger buttons are consumed by the layer system regardless of
-        // whether the layer is currently active.
+        // Suppress layer trigger buttons per the layer's passthrough_trigger
+        // mode. `never` (default) preserves the legacy "always consumed"
+        // behavior. `always` lets the trigger reach the output. `honor_timeout`
+        // suppresses only while the layer is currently active.
+        const active_layer_cfg = self.layer.getActive(configs);
         for (configs) |*cfg| {
-            const trigger_id = std.meta.stringToEnum(ButtonId, cfg.trigger) orelse continue;
+            const mode = passthrough.parseMode(cfg.passthrough_trigger);
+            const layer_active = active_layer_cfg == cfg;
+            if (!passthrough.shouldSuppress(mode, layer_active)) continue;
+            const trigger_name = cfg.trigger orelse continue;
+            const trigger_id = std.meta.stringToEnum(ButtonId, trigger_name) orelse continue;
             self.suppressed_buttons |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(trigger_id)));
         }
 
@@ -411,6 +581,10 @@ pub const Mapper = struct {
             self.suppressed_buttons |= cr.suppress_mask;
             chord_switch_request = cr.chord_index;
         }
+
+        // Apply the dynamic-binding chord suppress mask captured above (the
+        // `dyn_suppress` local was computed before the suppressed_buttons reset).
+        self.suppressed_buttons |= dyn_suppress;
 
         // per-source inject map: null = not mapped, Some = last-write target
         var per_src_inject: [BUTTON_COUNT]?RemapTargetResolved = [_]?RemapTargetResolved{null} ** BUTTON_COUNT;
@@ -671,6 +845,8 @@ pub const Mapper = struct {
             .aux = aux,
             .timer_request = timer_request,
             .chord_switch_request = chord_switch_request,
+            .dynamic_bind_event = dyn_event,
+            .feedback_rumble = dyn_rumble,
         };
     }
 
@@ -752,7 +928,8 @@ pub const Mapper = struct {
         }
 
         for (configs) |*cfg| {
-            const trigger_id = std.meta.stringToEnum(ButtonId, cfg.trigger) orelse continue;
+            const trigger_name = cfg.trigger orelse continue;
+            const trigger_id = std.meta.stringToEnum(ButtonId, trigger_name) orelse continue;
             suppressed |= @as(u64, 1) << @as(u6, @intCast(@intFromEnum(trigger_id)));
         }
         suppressed |= self.currentChordSwitchSuppressMask();
@@ -1794,6 +1971,641 @@ test "mapper: hold_toggle timer frame preserves chord selector suppression" {
     try testing.expectEqual(@as(u64, 0), timer_events.gamepad.?.buttons & lt_mask);
     try testing.expect((timer_events.gamepad.?.buttons & lm_mask) != 0);
     try testing.expect((timer_events.gamepad.?.buttons & rm_mask) != 0);
+}
+
+test "mapper: passthrough_trigger=always: layer trigger reaches gamepad output" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\activation = "hold"
+        \\passthrough_trigger = "always"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const lm_idx: u6 = @intCast(@intFromEnum(ButtonId.LM));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << lm_idx }, 16, 0);
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << lm_idx)) != 0);
+}
+
+test "mapper: dynamic_bind event: chord M1+RT bind emits OutputEvents.dynamic_bind_event with action=bound" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const rt_idx: u6 = @intCast(@intFromEnum(ButtonId.RT));
+    const m1_bit = @as(u64, 1) << m1_idx;
+    const rt_bit = @as(u64, 1) << rt_idx;
+
+    // Start chord: hold M1 alone for the debounce window.
+    const e1 = try m.apply(.{ .buttons = m1_bit }, 16, 0);
+    try testing.expect(e1.dynamic_bind_event == null);
+
+    // Press RT after debounce → bind fires, event emitted.
+    const e2 = try m.apply(.{ .buttons = m1_bit | rt_bit }, 16, 100 * std.time.ns_per_ms);
+    try testing.expect(e2.dynamic_bind_event != null);
+    try testing.expectEqual(dynamic_bind_mod.BindAction.bound, e2.dynamic_bind_event.?.action);
+    try testing.expectEqualStrings("aim", e2.dynamic_bind_event.?.layer_name);
+    try testing.expectEqual(ButtonId.RT, e2.dynamic_bind_event.?.button);
+}
+
+test "mapper: dynamic_bind event: same-button second chord emits action=unbound (toggle off)" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const rt_idx: u6 = @intCast(@intFromEnum(ButtonId.RT));
+    const m1_bit = @as(u64, 1) << m1_idx;
+    const rt_bit = @as(u64, 1) << rt_idx;
+
+    // First chord cycle: bind RT.
+    _ = try m.apply(.{ .buttons = m1_bit }, 16, 0);
+    _ = try m.apply(.{ .buttons = m1_bit | rt_bit }, 16, 100 * std.time.ns_per_ms);
+
+    // Release everything to reset the chord detector's last_fired memory.
+    _ = try m.apply(.{ .buttons = 0 }, 16, 200 * std.time.ns_per_ms);
+
+    // Second chord cycle on the same button: should unbind.
+    _ = try m.apply(.{ .buttons = m1_bit }, 16, 300 * std.time.ns_per_ms);
+    const e = try m.apply(.{ .buttons = m1_bit | rt_bit }, 16, 400 * std.time.ns_per_ms);
+
+    try testing.expect(e.dynamic_bind_event != null);
+    try testing.expectEqual(dynamic_bind_mod.BindAction.unbound, e.dynamic_bind_event.?.action);
+    try testing.expectEqual(@as(?ButtonId, null), m.dynamic_bind.?.getRuntimeTrigger());
+}
+
+test "mapper: dynamic_bind event: chord with layer's static trigger emits action=rejected_self" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const lm_idx: u6 = @intCast(@intFromEnum(ButtonId.LM));
+    const m1_bit = @as(u64, 1) << m1_idx;
+    const lm_bit = @as(u64, 1) << lm_idx;
+
+    _ = try m.apply(.{ .buttons = m1_bit }, 16, 0);
+    const e = try m.apply(.{ .buttons = m1_bit | lm_bit }, 16, 100 * std.time.ns_per_ms);
+
+    try testing.expect(e.dynamic_bind_event != null);
+    try testing.expectEqual(dynamic_bind_mod.BindAction.rejected_self, e.dynamic_bind_event.?.action);
+    // State unchanged: still empty.
+    try testing.expectEqual(@as(?ButtonId, null), m.dynamic_bind.?.getRuntimeTrigger());
+}
+
+test "mapper: dynamic_bind analog threshold=above — LT crossing threshold activates layer" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\trigger_threshold = 200
+        \\trigger_threshold_direction = "above"
+        \\release_threshold = 184
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Bind LT as the runtime trigger, bypassing chord detection.
+    m.dynamic_bind.?.runtime = .LT;
+
+    // Frame 1: LT = 100 (below threshold). Layer must not activate.
+    _ = try m.apply(.{ .lt = 100 }, 16, 0);
+    try testing.expect(m.layer.tap_hold == null);
+
+    // Frame 2: LT = 210 (above threshold). analog_edge → press; layer PENDING.
+    _ = try m.apply(.{ .lt = 210 }, 16, 16 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+}
+
+test "mapper: dynamic_bind analog hysteresis — LT in [184, 200) band stays active, drops out below 184" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\trigger_threshold = 200
+        \\trigger_threshold_direction = "above"
+        \\release_threshold = 184
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+    m.dynamic_bind.?.runtime = .LT;
+
+    // Frame 1: LT = 210 → press, layer PENDING.
+    _ = try m.apply(.{ .lt = 210 }, 16, 0);
+    try testing.expect(m.layer.tap_hold != null);
+
+    // Frame 2: LT drifts to 190 (within hysteresis band [184, 200)). Layer
+    // must remain active — no spurious release edge.
+    _ = try m.apply(.{ .lt = 190 }, 16, 16 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expect(m.runtime_analog_active);
+
+    // Frame 3: LT = 195 (still in band). Still active.
+    _ = try m.apply(.{ .lt = 195 }, 16, 32 * std.time.ns_per_ms);
+    try testing.expect(m.runtime_analog_active);
+
+    // Frame 4: LT drops to 180 (below release_threshold). Release edge fires.
+    _ = try m.apply(.{ .lt = 180 }, 16, 48 * std.time.ns_per_ms);
+    try testing.expect(!m.runtime_analog_active);
+    try testing.expect(m.layer.tap_hold == null);
+}
+
+test "mapper: dynamic_bind direction=below — light press in (0, threshold) activates layer" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\trigger_threshold = 100
+        \\trigger_threshold_direction = "below"
+        \\release_threshold = 116
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+    m.dynamic_bind.?.runtime = .RT;
+
+    // Frame 1: RT = 0 (resting). No activation.
+    _ = try m.apply(.{ .rt = 0 }, 16, 0);
+    try testing.expect(m.layer.tap_hold == null);
+
+    // Frame 2: RT rises briefly to 200 (hard press, above threshold) → still no activation.
+    _ = try m.apply(.{ .rt = 200 }, 16, 16 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold == null);
+
+    // Frame 3: RT drops to 60 (light press, below threshold). Layer activates.
+    _ = try m.apply(.{ .rt = 60 }, 16, 32 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+
+    // Frame 4: RT rises past release_threshold (130 >= 116). Layer releases.
+    _ = try m.apply(.{ .rt = 130 }, 16, 48 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold == null);
+}
+
+test "mapper: dynamic_bind digital runtime trigger ignores trigger_threshold cleanly" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\trigger_threshold = 200
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Bind A (a digital face button). Threshold fields must NOT affect it.
+    m.dynamic_bind.?.runtime = .A;
+
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const a_bit = @as(u64, 1) << a_idx;
+
+    // Press A → layer activates immediately (threshold fields ignored).
+    _ = try m.apply(.{ .buttons = a_bit }, 16, 0);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+}
+
+test "mapper: dynamic_bind default direction is `above` when omitted" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\trigger_threshold = 200
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+    m.dynamic_bind.?.runtime = .LT;
+
+    // LT > 200 should activate (above semantics).
+    _ = try m.apply(.{ .lt = 100 }, 16, 0);
+    try testing.expect(m.layer.tap_hold == null);
+    _ = try m.apply(.{ .lt = 220 }, 16, 16 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold != null);
+}
+
+test "mapper: dynamic_bind chord binds LT via analog pull (no global trigger_threshold)" {
+    // Repro of user-reported bug: with no top-level `trigger_threshold` and
+    // a dynamic_bind that doesn't yet have a runtime, holding the modifier
+    // and pulling LT should bind LT. Without the chord-input augmentation
+    // below, state.buttons would never have the LT bit and the chord
+    // detector would never see the press.
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["O"]
+        \\hold_ms = 80
+        \\trigger_threshold = 200
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const o_idx: u6 = @intCast(@intFromEnum(ButtonId.O));
+    const o_bit = @as(u64, 1) << o_idx;
+
+    // Hold O alone for the debounce window. LT analog stays at 0.
+    _ = try m.apply(.{ .buttons = o_bit }, 16, 0);
+
+    // After 100ms (past 80ms debounce), pull LT past threshold while still
+    // holding O. The user's intent is a deliberate hard press → bind LT.
+    _ = try m.apply(.{ .buttons = o_bit, .lt = 230 }, 16, 100 * std.time.ns_per_ms);
+
+    try testing.expectEqual(@as(?ButtonId, .LT), m.dynamic_bind.?.getRuntimeTrigger());
+}
+
+test "mapper: dynamic_bind chord-binds LT, then LT crossing threshold activates aim end-to-end" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+        \\trigger_threshold = 200
+        \\release_threshold = 184
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const lt_idx: u6 = @intCast(@intFromEnum(ButtonId.LT));
+    const m1_bit = @as(u64, 1) << m1_idx;
+    const lt_bit = @as(u64, 1) << lt_idx;
+
+    // 1. Hold M1 alone for the debounce window.
+    _ = try m.apply(.{ .buttons = m1_bit }, 16, 0);
+    // 2. Hold M1+LT past 80ms → chord binds LT as runtime trigger.
+    //    LT is set as a digital bit here for the chord-detection step (the
+    //    chord detector reads `state.buttons` directly, not analog values).
+    _ = try m.apply(.{ .buttons = m1_bit | lt_bit, .lt = 255 }, 16, 100 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?ButtonId, .LT), m.dynamic_bind.?.getRuntimeTrigger());
+
+    // 3. Release everything.
+    _ = try m.apply(.{ .buttons = 0, .lt = 0 }, 16, 200 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold == null);
+
+    // 4. Light pull on LT (below 200) — must NOT activate aim.
+    _ = try m.apply(.{ .lt = 100 }, 16, 300 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold == null);
+
+    // 5. Hard pull on LT (>= 200) — analog edge fires, aim activates.
+    _ = try m.apply(.{ .lt = 220 }, 16, 320 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+}
+
+test "mapper: dynamic_bind invalid modifier name disables feature without crashing" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["NotARealButton"]
+    , allocator);
+    defer parsed.deinit();
+
+    // Mapping still loads — invalid dynamic_bind must be a warning, not fatal.
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // The chord detector silently falls back to null so no chord ever fires.
+    try testing.expect(m.dynamic_bind_chord == null);
+
+    // Frame: no crash, no binding.
+    _ = try m.apply(.{ .buttons = 0 }, 16, 0);
+    try testing.expect(m.dynamic_bind.?.getRuntimeTrigger() == null);
+}
+
+test "mapper: dynamic_bind unknown target_layer disables feature without crashing" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "nonexistent"
+        \\modifier = ["M1"]
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Feature disabled because target_layer doesn't match any [[layer]].
+    try testing.expect(m.dynamic_bind_chord == null);
+}
+
+test "mapper: dynamic_bind feedback_rumble: bound action emits a strong pulse" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const rt_idx: u6 = @intCast(@intFromEnum(ButtonId.RT));
+    const m1_bit = @as(u64, 1) << m1_idx;
+    const rt_bit = @as(u64, 1) << rt_idx;
+
+    _ = try m.apply(.{ .buttons = m1_bit }, 16, 0);
+    const e = try m.apply(.{ .buttons = m1_bit | rt_bit }, 16, 100 * std.time.ns_per_ms);
+
+    try testing.expect(e.feedback_rumble != null);
+    try testing.expect(e.feedback_rumble.?.strong > 0);
+    try testing.expect(e.feedback_rumble.?.duration_ms > 0);
+}
+
+test "mapper: dynamic_bind union: static trigger still activates while runtime trigger is bound" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Runtime bound to RT.
+    m.dynamic_bind.?.runtime = .RT;
+
+    // Pressing the STATIC trigger LM (not RT) still activates the aim layer.
+    const lm_idx: u6 = @intCast(@intFromEnum(ButtonId.LM));
+    _ = try m.apply(.{ .buttons = @as(u64, 1) << lm_idx }, 16, 0);
+
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+}
+
+test "mapper: dynamic_bind story 12: bind to button with remap → layer activates AND remap fires" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[remap]
+        \\A = "KEY_F13"
+        \\
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Manually bind A as runtime trigger (skipping chord detection for focus).
+    m.dynamic_bind.?.runtime = .A;
+
+    const a_idx: u6 = @intCast(@intFromEnum(ButtonId.A));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << a_idx }, 16, 0);
+
+    // Layer activated (PENDING tap-hold owned by aim).
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+
+    // Remap still fires: A → KEY_F13 emitted as aux event.
+    var saw_f13 = false;
+    var i: usize = 0;
+    while (i < events.aux.len) : (i += 1) {
+        switch (events.aux.get(i)) {
+            .key => |k| if (k.code == 183 and k.pressed) {
+                saw_f13 = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_f13);
+}
+
+test "mapper: dynamic_bind end-to-end: chord M1+RT binds RT, then RT alone activates aim" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const m1_idx: u6 = @intCast(@intFromEnum(ButtonId.M1));
+    const rt_idx: u6 = @intCast(@intFromEnum(ButtonId.RT));
+    const m1_bit = @as(u64, 1) << m1_idx;
+    const rt_bit = @as(u64, 1) << rt_idx;
+
+    // 1. Hold M1 alone. No binding yet (debounce).
+    _ = try m.apply(.{ .buttons = m1_bit }, 16, 0);
+    try testing.expectEqual(@as(?ButtonId, null), m.dynamic_bind.?.getRuntimeTrigger());
+
+    // 2. Hold M1+RT past 80ms debounce → bind RT.
+    _ = try m.apply(.{ .buttons = m1_bit | rt_bit }, 16, 100 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(?ButtonId, .RT), m.dynamic_bind.?.getRuntimeTrigger());
+
+    // 3. Release everything (let last-fired memory reset).
+    _ = try m.apply(.{ .buttons = 0 }, 16, 200 * std.time.ns_per_ms);
+
+    // 4. Press RT alone → aim layer activates (PENDING with timer armed).
+    _ = try m.apply(.{ .buttons = rt_bit }, 16, 300 * std.time.ns_per_ms);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+}
+
+test "mapper: dynamic_bind runtime trigger activates dynamic-only layer" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    // Manually set runtime binding (bypass chord detection for unit-test focus).
+    m.dynamic_bind.?.runtime = .RT;
+
+    const rt_idx: u6 = @intCast(@intFromEnum(ButtonId.RT));
+    _ = try m.apply(.{ .buttons = @as(u64, 1) << rt_idx }, 16, 0);
+
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expectEqualStrings("aim", m.layer.tap_hold.?.layer_name);
+}
+
+test "mapper: passthrough_trigger=honor_timeout: layer PENDING → trigger passes through" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\activation = "hold"
+        \\passthrough_trigger = "honor_timeout"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const configs = parsed.value.layer.?;
+    // PENDING phase: press registered, timer NOT yet fired.
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
+    try testing.expect(m.layer.tap_hold != null);
+    try testing.expect(!m.layer.tap_hold.?.layer_activated);
+
+    const lm_idx: u6 = @intCast(@intFromEnum(ButtonId.LM));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << lm_idx }, 16, 0);
+    // PENDING phase + honor_timeout → passthrough: LM reaches the output.
+    try testing.expect((events.gamepad.buttons & (@as(u64, 1) << lm_idx)) != 0);
+}
+
+test "mapper: passthrough_trigger=honor_timeout: layer ACTIVE → trigger suppressed" {
+    const allocator = testing.allocator;
+    const parsed = try makeMapping(
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\activation = "hold"
+        \\passthrough_trigger = "honor_timeout"
+    , allocator);
+    defer parsed.deinit();
+
+    var m = try makeMapper(&parsed.value, allocator);
+    defer m.deinit();
+
+    const configs = parsed.value.layer.?;
+    // Drive the aim layer into ACTIVE phase: press LM, fire hold timer.
+    _ = m.layer.onTriggerPress(configs[0].name, 200, 0);
+    _ = m.onLayerTimerExpired();
+    try testing.expect(m.layer.tap_hold.?.layer_activated);
+
+    const lm_idx: u6 = @intCast(@intFromEnum(ButtonId.LM));
+    const events = try m.apply(.{ .buttons = @as(u64, 1) << lm_idx }, 16, 0);
+    // ACTIVE phase + honor_timeout → suppress: LM must NOT reach output.
+    try testing.expectEqual(@as(u64, 0), events.gamepad.buttons & (@as(u64, 1) << lm_idx));
 }
 
 test "mapper: layer gyro override: active layer gyro config used" {

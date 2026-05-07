@@ -6,6 +6,11 @@ name = "vader5"
 # Hold LM: aim mode — gyro + right stick act as mouse for camera control.
 # Hold RM: mouse mode — right stick moves cursor, A/B are mouse clicks.
 #
+# Dynamic layer binding (issue #229): hold O+<button> to rebind the aim
+# layer's runtime trigger to <button> on the fly. Useful for matching the
+# in-game aim button (LT/RT/RB/A/X) without editing this file mid-session.
+# See docs/dynamic-layer-binding.md for the full workflow.
+#
 # Edit ~/.config/padctl/mappings/vader5.toml for personal customizations.
 # Apply changes with: padctl switch vader5
 
@@ -25,12 +30,17 @@ sensitivity = 1.0
 [dpad]
 mode = "gamepad"
 
-# Aim mode (hold LM): gyro + right stick → mouse for camera/aim
+# Aim mode (hold LM): gyro + right stick → mouse for camera/aim.
+#
+# `passthrough_trigger = "honor_timeout"` lets brief LM taps reach the game
+# (so a quick-aim press still registers) while long holds activate the
+# layer cleanly without the held LM bit leaking through after activation.
 [[layer]]
 name = "aim"
 trigger = "LM"
 activation = "hold"
 hold_timeout = 200
+passthrough_trigger = "honor_timeout"
 
 [layer.gyro]
 mode = "mouse"
@@ -45,7 +55,7 @@ sensitivity = 40.0
 deadzone = 2000
 suppress_gamepad = true
 
-# Mouse mode (hold RM): right stick → cursor, A/B → mouse clicks
+# Mouse mode (hold RM): right stick → cursor, A/B → mouse clicks.
 [[layer]]
 name = "mouse"
 trigger = "RM"
@@ -61,3 +71,28 @@ mode = "mouse"
 sensitivity = 40.0
 deadzone = 2000
 suppress_gamepad = true
+
+# --- Dynamic layer binding ---
+#
+# Hold O + any other button for ~80ms to rebind the "aim" layer's runtime
+# trigger to that button. Pressing the same combo with the bound button
+# unbinds; with a different button replaces.
+#
+# `trigger_threshold` only applies when the bound button is analog (LT/RT).
+# A pull strength >= 200 (of 0–255) activates aim; releasing below 184
+# (the hysteresis cutoff) deactivates. Set `direction = "below"` for the
+# inverse — light touch activates, hard pull deactivates.
+#
+# Modifier choice: O (the Flydigi logo button at the bottom-center) is
+# routed as BTN_TRIGGER_HAPPY9 to the virtual gamepad. Most games leave
+# this button unbound, so it's safe to use as a modifier. Alternatives:
+#   modifier = ["M1"]            # rear-left paddle, also rarely bound
+#   modifier = ["LB", "RB"]      # two-button chord, harder to fire by accident
+#   modifier = ["Turbo"]         # once Turbo bit is captured by padctl-capture
+[dynamic_bind]
+target_layer = "aim"
+modifier = ["O"]
+hold_ms = 80
+trigger_threshold = 200
+trigger_threshold_direction = "above"
+release_threshold = 184

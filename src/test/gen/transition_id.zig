@@ -179,7 +179,8 @@ pub fn classify(
         for (layers, 0..) |*lc, idx| {
             if (idx == cur_os.hold_layer_idx) continue;
             if (std.mem.eql(u8, lc.activation, "hold")) {
-                const tmask = btnMaskByName(lc.trigger);
+                const trig = lc.trigger orelse continue;
+                const tmask = btnMaskByName(trig);
                 if (tmask != 0 and (buttons & tmask) != 0 and (prev_buttons & tmask) == 0)
                     tracker.mark(.layer_mutual_exclusion_blocked);
             }
@@ -226,7 +227,9 @@ fn hasActiveToggle(os: *const OracleState) bool {
 fn layerTriggerMask(cfg: *const mapping.MappingConfig) u64 {
     const layers = cfg.layer orelse return 0;
     var mask: u64 = 0;
-    for (layers) |*lc| mask |= btnMaskByName(lc.trigger);
+    for (layers) |*lc| {
+        if (lc.trigger) |trig| mask |= btnMaskByName(trig);
+    }
     return mask;
 }
 
