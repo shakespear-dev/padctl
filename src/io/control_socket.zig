@@ -165,6 +165,18 @@ pub const ControlSocket = struct {
     pub fn sendResponse(_: *ControlSocket, fd: posix.fd_t, msg: []const u8) void {
         _ = posix.write(fd, msg) catch {};
     }
+
+    /// Push a line to every currently-connected client. Best-effort: per-fd
+    /// write errors are silently ignored (a client may have closed its half
+    /// of the socket; we'll prune it on the next read). The caller passes a
+    /// pre-formatted message; this method does NOT append a newline, so the
+    /// caller is responsible for line termination.
+    pub fn broadcastLine(self: *const ControlSocket, msg: []const u8) void {
+        for (self.client_fds) |fd| {
+            if (fd < 0) continue;
+            _ = posix.write(fd, msg) catch continue;
+        }
+    }
 };
 
 pub const CommandTag = enum {
@@ -178,6 +190,7 @@ pub const CommandTag = enum {
     dump_on,
     dump_off,
     dump_status,
+    bind_event,
     unknown,
 };
 
@@ -189,6 +202,10 @@ pub const Command = struct {
     device_id: []const u8 = "",
     /// Chord index for CHORD_SWITCH command (1..255). 0 = unset.
     chord_index: u8 = 0,
+    /// `BIND_EVENT <action> <layer> <button>` — `name` carries the layer.
+    /// `bind_action` and `bind_button` are the other two tokens.
+    bind_action: []const u8 = "",
+    bind_button: []const u8 = "",
 };
 
 pub fn parseCommand(raw: []const u8) Command {
@@ -229,6 +246,11 @@ pub fn parseCommand(raw: []const u8) Command {
         if (std.ascii.eqlIgnoreCase(mode, "OFF")) return .{ .tag = .dump_off };
         if (std.ascii.eqlIgnoreCase(mode, "STATUS")) return .{ .tag = .dump_status };
         return .{ .tag = .unknown };
+    } else if (std.ascii.eqlIgnoreCase(verb, "BIND_EVENT")) {
+        const action = it.next() orelse return .{ .tag = .unknown };
+        const layer = it.next() orelse return .{ .tag = .unknown };
+        const button = it.next() orelse return .{ .tag = .unknown };
+        return .{ .tag = .bind_event, .bind_action = action, .name = layer, .bind_button = button };
     }
     return .{ .tag = .unknown };
 }
@@ -328,6 +350,20 @@ test "control_socket: parseCommand: empty" {
     try testing.expectEqual(CommandTag.unknown, cmd.tag);
 }
 
+test "control_socket: parseCommand: BIND_EVENT bound aim RT" {
+    const cmd = parseCommand("BIND_EVENT bound aim RT\n");
+    try testing.expectEqual(CommandTag.bind_event, cmd.tag);
+    try testing.expectEqualStrings("bound", cmd.bind_action);
+    try testing.expectEqualStrings("aim", cmd.name);
+    try testing.expectEqualStrings("RT", cmd.bind_button);
+}
+
+test "control_socket: parseCommand: BIND_EVENT missing args is unknown" {
+    try testing.expectEqual(CommandTag.unknown, parseCommand("BIND_EVENT\n").tag);
+    try testing.expectEqual(CommandTag.unknown, parseCommand("BIND_EVENT bound\n").tag);
+    try testing.expectEqual(CommandTag.unknown, parseCommand("BIND_EVENT bound aim\n").tag);
+}
+
 test "control_socket: parseCommand: case insensitive" {
     const cmd = parseCommand("switch FPS\n");
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
@@ -396,6 +432,52 @@ fn testSocketpair() ![2]posix.fd_t {
     if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds) != 0)
         return posix.unexpectedErrno(posix.errno(0));
     return fds;
+}
+
+test "control_socket: broadcastLine: writes to every connected client fd" {
+    const pair1 = try testSocketpair();
+    defer posix.close(pair1[0]);
+    defer posix.close(pair1[1]);
+    const pair2 = try testSocketpair();
+    defer posix.close(pair2[0]);
+    defer posix.close(pair2[1]);
+
+    var cs: ControlSocket = .{
+        .listen_fd = -1,
+        .client_fds = .{ pair1[0], pair2[0], -1, -1 },
+        .client_count = 2,
+        .path = &.{},
+        .allocator = testing.allocator,
+    };
+
+    cs.broadcastLine("EVENT bind action=bound layer=aim button=RT\n");
+
+    var buf: [128]u8 = undefined;
+    const n1 = try posix.read(pair1[1], &buf);
+    try testing.expectEqualStrings("EVENT bind action=bound layer=aim button=RT\n", buf[0..n1]);
+    const n2 = try posix.read(pair2[1], &buf);
+    try testing.expectEqualStrings("EVENT bind action=bound layer=aim button=RT\n", buf[0..n2]);
+}
+
+test "control_socket: broadcastLine: skips closed (-1) slots, no error" {
+    const pair = try testSocketpair();
+    defer posix.close(pair[0]);
+    defer posix.close(pair[1]);
+
+    // Only one slot has a real fd; the rest are -1 sentinels.
+    var cs: ControlSocket = .{
+        .listen_fd = -1,
+        .client_fds = .{ -1, pair[0], -1, -1 },
+        .client_count = 1,
+        .path = &.{},
+        .allocator = testing.allocator,
+    };
+
+    cs.broadcastLine("hi\n");
+
+    var buf: [16]u8 = undefined;
+    const n = try posix.read(pair[1], &buf);
+    try testing.expectEqualStrings("hi\n", buf[0..n]);
 }
 
 test "control_socket: ControlSocket: socketpair read/write" {
