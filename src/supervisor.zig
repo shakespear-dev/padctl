@@ -1764,8 +1764,24 @@ pub const Supervisor = struct {
             .dump_on => self.handleDump(fd, true),
             .dump_off => self.handleDump(fd, false),
             .dump_status => self.handleDumpStatus(fd),
+            .bind_event => self.handleBindEvent(fd, cmd.bind_action, cmd.name, cmd.bind_button),
             .unknown => cs.sendResponse(fd, "ERR unknown-command\n"),
         }
+    }
+
+    /// BIND_EVENT is fired by the per-device event loop when a dynamic
+    /// binding action happens. The supervisor broadcasts a formatted line
+    /// to every currently-connected client so external listeners (tray UIs,
+    /// `padctl listen`-style tools) can observe the runtime state.
+    fn handleBindEvent(self: *Supervisor, fd: posix.fd_t, action: []const u8, layer: []const u8, button: []const u8) void {
+        var cs = &self.ctrl_sock.?;
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "EVENT bind action={s} layer={s} button={s}\n", .{ action, layer, button }) catch {
+            cs.sendResponse(fd, "ERR bind-event-format\n");
+            return;
+        };
+        cs.broadcastLine(msg);
+        cs.sendResponse(fd, "OK\n");
     }
 
     fn handleChordSwitch(self: *Supervisor, fd: posix.fd_t, chord_index: u8) void {
@@ -2041,6 +2057,19 @@ pub const Supervisor = struct {
         return resolveEvdevNodesAt("/sys/class/input", vid, pid, out);
     }
 
+    /// Format the `dyn_bind` line fragment appended to STATUS for one device.
+    /// Pulled out so the format can be snapshot-tested without spinning up a
+    /// full Supervisor + Mapper. Writes nothing when no `[dynamic_bind]` is
+    /// configured for that device's mapping.
+    pub fn formatDynamicBindStatus(
+        writer: anytype,
+        target_layer: []const u8,
+        static_name: []const u8,
+        runtime_name: []const u8,
+    ) !void {
+        try writer.print(" dyn_bind={s} static={s} runtime={s}", .{ target_layer, static_name, runtime_name });
+    }
+
     pub fn handleStatus(self: *Supervisor, fd: posix.fd_t) void {
         var cs = &self.ctrl_sock.?;
         var buf: [4096]u8 = undefined;
@@ -2052,6 +2081,11 @@ pub const Supervisor = struct {
         for (self.managed.items) |*m| {
             const name = m.instance.device_cfg.device.name;
             const state_str: []const u8 = if (m.suspended) "suspended" else "active";
+            const mapping_pr: ?*const mapping_mod.MappingConfig = blk: {
+                if (m.switch_mapping) |sm| break :blk &sm.value;
+                if (m.default_mapping_pr) |dm| break :blk &dm.value;
+                break :blk null;
+            };
             const mapping_name: []const u8 = blk: {
                 if (m.switch_mapping) |sm| {
                     if (sm.value.name) |n| break :blk n;
@@ -2101,6 +2135,29 @@ pub const Supervisor = struct {
             w.print(" last_inbound_ms_ago={d} last_outbound_ms_ago={d} write_in_flight_ms={d}", .{
                 inb_ago_ms, outb_ago_ms, inflight_ms,
             }) catch {};
+
+            // Dynamic-binding status. Shows the target layer plus its static
+            // trigger (when any) and the currently-bound runtime trigger
+            // (when any). Omitted entirely when [dynamic_bind] is not
+            // configured for this mapping.
+            const mp = mapping_pr orelse continue;
+            const dbc = mp.dynamic_bind orelse continue;
+            const static_name: []const u8 = blk: {
+                const layers = mp.layer orelse break :blk "-";
+                for (layers) |lc| {
+                    if (std.mem.eql(u8, lc.name, dbc.target_layer)) {
+                        break :blk lc.trigger orelse "-";
+                    }
+                }
+                break :blk "-";
+            };
+            const runtime_name: []const u8 = blk: {
+                const mapper = m.instance.mapper orelse break :blk "-";
+                const dyn = mapper.dynamic_bind orelse break :blk "-";
+                const btn = dyn.getRuntimeTrigger() orelse break :blk "-";
+                break :blk @tagName(btn);
+            };
+            formatDynamicBindStatus(w, dbc.target_layer, static_name, runtime_name) catch break;
         }
         w.writeByte('\n') catch return;
         cs.sendResponse(fd, stream.getWritten());
@@ -3412,6 +3469,34 @@ test "supervisor: liveness sweep spares an all-suppress instance with no read fd
     sup.sweepLivenessLibusb();
     try testing.expectEqual(@as(usize, 1), sup.managed.items.len);
     try testing.expect(sup.devname_map.contains("hidraw0"));
+}
+
+test "supervisor: formatDynamicBindStatus: both static and runtime present" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try Supervisor.formatDynamicBindStatus(fbs.writer(), "aim", "LM", "RT");
+    try testing.expectEqualStrings(" dyn_bind=aim static=LM runtime=RT", fbs.getWritten());
+}
+
+test "supervisor: formatDynamicBindStatus: static only, runtime not bound" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try Supervisor.formatDynamicBindStatus(fbs.writer(), "aim", "LM", "-");
+    try testing.expectEqualStrings(" dyn_bind=aim static=LM runtime=-", fbs.getWritten());
+}
+
+test "supervisor: formatDynamicBindStatus: dynamic-only layer (no static), runtime bound" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try Supervisor.formatDynamicBindStatus(fbs.writer(), "aim", "-", "RT");
+    try testing.expectEqualStrings(" dyn_bind=aim static=- runtime=RT", fbs.getWritten());
+}
+
+test "supervisor: formatDynamicBindStatus: neither static nor runtime (dead/unbound)" {
+    var buf: [128]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try Supervisor.formatDynamicBindStatus(fbs.writer(), "aim", "-", "-");
+    try testing.expectEqualStrings(" dyn_bind=aim static=- runtime=-", fbs.getWritten());
 }
 
 test "supervisor: Supervisor: global SWITCH rolls back all devices on failure" {
@@ -5331,7 +5416,13 @@ test "supervisor: STATUS -> default_mapping lookup -> handleSwitch succeeds" {
 
     // Step 1: STATUS response contains the connected device name.
     sup.handleStatus(resp_fds[0]);
-    var status_buf: [256]u8 = undefined;
+    // Must be large enough to drain the ENTIRE STATUS line in one read — the
+    // line carries per-device diagnostics (issue #236 evdev_node, wedge
+    // timings) and can resolve a real /sys/class/input node when the test's
+    // dummy vid:pid (1:2) happens to match a host input device. A short read
+    // leaves the tail buffered on the stream socket and corrupts the Step-4
+    // read below. Sized to match handleStatus's own 4096-byte emit buffer.
+    var status_buf: [4096]u8 = undefined;
     const status_n = try posix.read(resp_fds[1], &status_buf);
     const status_resp = status_buf[0..status_n];
     try testing.expect(std.mem.indexOf(u8, status_resp, "device=T") != null);

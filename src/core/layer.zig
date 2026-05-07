@@ -5,6 +5,15 @@ const remap = @import("remap.zig");
 pub const LayerConfig = mapping.LayerConfig;
 pub const RemapTarget = remap.RemapTargetResolved;
 
+/// Runtime binding from the dynamic-binding system. When the mapper has a
+/// runtime-bound trigger for a layer, it passes this struct to
+/// `processLayerTriggersWithRuntime` so the named layer can be activated by
+/// either its static `trigger` (if any) or this `button`.
+pub const RuntimeBinding = struct {
+    layer_name: []const u8,
+    button: @import("state.zig").ButtonId,
+};
+
 pub const LayerAction = struct {
     arm_timer_ms: ?u64 = null,
     disarm_timer: bool = false,
@@ -85,11 +94,39 @@ pub const LayerState = struct {
         prev_buttons: u64,
         now_ns: i128,
     ) LayerAction {
+        return self.processLayerTriggersWithRuntime(configs, buttons, prev_buttons, now_ns, null);
+    }
+
+    /// Same as `processLayerTriggers` plus a runtime binding for one named layer.
+    /// When `runtime != null`, the named layer's effective trigger mask is the
+    /// UNION of its static `cfg.trigger` (if any) and the runtime button. A
+    /// layer with a null static trigger is reachable only via runtime binding.
+    pub fn processLayerTriggersWithRuntime(
+        self: *LayerState,
+        configs: []const LayerConfig,
+        buttons: u64,
+        prev_buttons: u64,
+        now_ns: i128,
+        runtime: ?RuntimeBinding,
+    ) LayerAction {
         var action = LayerAction{};
 
         for (configs) |*cfg| {
-            const trigger_id = std.meta.stringToEnum(@import("state.zig").ButtonId, cfg.trigger) orelse continue;
-            const mask = @as(u64, 1) << @as(u6, @intCast(@intFromEnum(trigger_id)));
+            const static_mask: u64 = blk: {
+                const name = cfg.trigger orelse break :blk 0;
+                const id = std.meta.stringToEnum(@import("state.zig").ButtonId, name) orelse break :blk 0;
+                break :blk @as(u64, 1) << @as(u6, @intCast(@intFromEnum(id)));
+            };
+            const runtime_mask: u64 = if (runtime) |r|
+                if (std.mem.eql(u8, r.layer_name, cfg.name))
+                    @as(u64, 1) << @as(u6, @intCast(@intFromEnum(r.button)))
+                else
+                    0
+            else
+                0;
+            const mask = static_mask | runtime_mask;
+            if (mask == 0) continue;
+
             const pressed = (buttons & mask) != 0;
             const was_pressed = (prev_buttons & mask) != 0;
 
@@ -776,4 +813,31 @@ test "layer: processLayerTriggers: multiple Toggles on — declaration order win
     _ = ls.processLayerTriggers(&configs, 0, rb, 0);
     try testing.expect(!ls.toggled.contains("b"));
     try testing.expectEqualStrings("a", ls.getActive(&configs).?.name);
+}
+
+// --- Dynamic-binding integration: runtime trigger drives the same tap-hold machine ---
+
+test "layer: runtime trigger activates dynamic-only layer (no static trigger)" {
+    var ls = LayerState.init(testing.allocator);
+    defer ls.deinit();
+
+    // Layer with no static trigger — only the runtime binding can activate.
+    const aim_only = LayerConfig{ .name = "aim", .trigger = null, .activation = "hold" };
+    const configs = [_]LayerConfig{aim_only};
+
+    const rt_idx: u6 = @intCast(@intFromEnum(@import("state.zig").ButtonId.RT));
+    const rt = @as(u64, 1) << rt_idx;
+
+    const action = ls.processLayerTriggersWithRuntime(
+        &configs,
+        rt,
+        0,
+        0,
+        .{ .layer_name = "aim", .button = .RT },
+    );
+
+    try testing.expect(action.arm_timer_ms != null);
+    try testing.expectEqual(@as(u64, 200), action.arm_timer_ms.?);
+    try testing.expect(ls.tap_hold != null);
+    try testing.expectEqualStrings("aim", ls.tap_hold.?.layer_name);
 }
