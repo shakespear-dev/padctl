@@ -1,10 +1,20 @@
 const std = @import("std");
 const padctl_log = @import("log.zig");
+const panic_handler = @import("panic_handler.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
     .logFn = padctl_log.logFn,
 };
+
+/// Custom panic handler: writes a "PANIC" line to the persistent log,
+/// fires a zero-rumble HID frame to every registered device (so a crash
+/// mid-rumble does not leave the controller's motor stuck on), then
+/// defers to the default panic for the stack trace and abort. The
+/// sentinel file in `~/.local/state/padctl/dirty_marker` is deliberately
+/// NOT cleaned up here — its presence on next startup is what tells us
+/// the previous exit was dirty. See `src/panic_handler.zig`.
+pub const Panic = std.debug.FullPanic(panic_handler.handlePanic);
 
 fn stdoutWrite(_: void, data: []const u8) error{}!usize {
     return std.posix.write(std.posix.STDOUT_FILENO, data) catch data.len;
@@ -1071,6 +1081,19 @@ pub fn main() !void {
     padctl_log.initPath(allocator);
     defer padctl_log.deinit();
 
+    // Crash-vs-clean-exit telemetry. `initPath` already created the state
+    // dir; reuse it for the sentinel file so a future stuck-rumble report
+    // can be correlated post-hoc with whether padctl crashed near the
+    // same timestamp. Marker is deleted on graceful shutdown below.
+    if (config.paths.stateDir(allocator)) |state_dir| {
+        defer allocator.free(state_dir);
+        panic_handler.setSentinelPath(state_dir);
+    } else |err| {
+        std.log.warn("crash sentinel disabled: stateDir resolve failed: {}", .{err});
+    }
+    const prior_exit = panic_handler.checkAndArmSentinel();
+    defer panic_handler.markCleanExit();
+
     // Step 2: load diagnostics config. Warnings during load now persist.
     const log_opts: padctl_log.InitOptions = blk: {
         const user_cfg_mod = @import("config/user_config.zig");
@@ -1088,7 +1111,11 @@ pub fn main() !void {
     // Step 3: apply config — sets rotation size, dump toggle, opens file if dump on.
     padctl_log.applyConfig(log_opts);
 
-    std.log.info("padctl started, PID={d}, dump={}", .{ std.os.linux.getpid(), padctl_log.isEnabled() });
+    std.log.info("padctl started, PID={d}, dump={}, prior_exit={s}", .{
+        std.os.linux.getpid(),
+        padctl_log.isEnabled(),
+        @tagName(prior_exit),
+    });
 
     // --config-dir mode: glob *.toml, discover all devices, dedup by physical path, hot-reload on SIGHUP
     if (parsed.config_dir) |dir_path| {
