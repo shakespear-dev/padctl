@@ -170,7 +170,23 @@ test "scan matching: all device files parse for vid/pid lookup" {
 // --- 5. Config subcommands ---
 
 // MED-3: `padctl config edit` — no mapping files present returns NoMappingFound.
+// Skip when any mapping file exists in the search path: config_edit.run would
+// fall through to spawning $EDITOR and block indefinitely (the runner is not
+// interactive). CI runners have empty search paths and exercise the failure
+// path correctly; developer boxes with installed mappings skip.
 test "config edit: no mapping found error" {
+    const dirs = paths_mod.resolveMappingConfigDirs(testing.allocator) catch &[_][]const u8{};
+    defer if (dirs.len > 0) paths_mod.freeConfigDirs(testing.allocator, @constCast(dirs));
+    for (dirs) |dir| {
+        var d = std.fs.openDirAbsolute(dir, .{ .iterate = true }) catch continue;
+        defer d.close();
+        var it = d.iterate();
+        while (it.next() catch null) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".toml")) {
+                return error.SkipZigTest;
+            }
+        }
+    }
     const result = config_edit.run(testing.allocator, null);
     try testing.expectError(error.NoMappingFound, result);
 }
