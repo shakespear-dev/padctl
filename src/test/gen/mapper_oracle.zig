@@ -192,7 +192,8 @@ pub fn applyWithLayer(
 
 fn processLayers(os: *OracleState, layers: []const LayerConfig, buttons: u64, dt_ms: u64) void {
     for (layers, 0..) |*lc, idx| {
-        const trigger_mask = btnMaskByName(lc.trigger);
+        const trigger_name = lc.trigger orelse continue;
+        const trigger_mask = btnMaskByName(trigger_name);
         if (trigger_mask == 0) continue;
         const pressed = (buttons & trigger_mask) != 0;
         const was_pressed = (os.prev_buttons & trigger_mask) != 0;

@@ -316,6 +316,21 @@ fn dispatchChordSwitch(chord_index: u8) void {
     _ = posix.write(fd, cmd) catch return;
 }
 
+/// Fire a BIND_EVENT command at the daemon's own control socket so the
+/// supervisor can broadcast it to subscribed clients (tray UIs,
+/// `padctl listen`-style tools). Same fire-and-forget pattern as
+/// `dispatchChordSwitch`.
+fn dispatchBindEvent(action: []const u8, layer: []const u8, button: []const u8) void {
+    var path_buf: [256]u8 = undefined;
+    const sock_path = socket_client.resolveSocketPath(&path_buf);
+    const fd = socket_client.connectToSocket(sock_path) catch return;
+    defer posix.close(fd);
+
+    var cmd_buf: [128]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "BIND_EVENT {s} {s} {s}\n", .{ action, layer, button }) catch return;
+    _ = posix.write(fd, cmd) catch return;
+}
+
 pub const EventLoopContext = struct {
     devices: []DeviceIO,
     interpreter: *const Interpreter,
@@ -876,6 +891,18 @@ pub const EventLoop = struct {
                                     .disarm => disarmTimer(self.timer_fd),
                                 };
                                 if (events.chord_switch_request) |idx| dispatchChordSwitch(idx);
+                                if (events.dynamic_bind_event) |dbe| {
+                                    std.log.info("dynamic_bind: {s} layer={s} button={s}", .{ @tagName(dbe.action), dbe.layer_name, @tagName(dbe.button) });
+                                    dispatchBindEvent(@tagName(dbe.action), dbe.layer_name, @tagName(dbe.button));
+                                }
+                                if (events.feedback_rumble) |fb| {
+                                    // Reserve slot MAX_EFFECTS-1 for internal feedback. Schedule
+                                    // auto-stop via the existing rumble timerfd path.
+                                    const fb_slot: u8 = rumble_scheduler_mod.MAX_EFFECTS - 1;
+                                    const fb_result = self.rumble_scheduler.onPlay(fb_slot, fb.strong, fb.weak, fb.duration_ms, now);
+                                    if (fb_result.frame) |fb_frame| self.emitOrQueueRumble(ctx, fb_frame, now);
+                                    self.armRumbleTimer(fb_result.next_deadline_ns);
+                                }
                                 self.emitGamepadOutput(ctx, events.gamepad, now, "input") catch |err| {
                                     std.log.err("output.emit failed: {}", .{err});
                                     continue;

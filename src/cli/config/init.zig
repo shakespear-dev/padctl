@@ -347,7 +347,8 @@ test "init: 'fps' template validates and emits the aim layer" {
     const layers = parsed.value.layer orelse return error.TestExpectedLayer;
     try std.testing.expectEqual(@as(usize, 1), layers.len);
     try std.testing.expectEqualStrings("aim", layers[0].name);
-    try std.testing.expectEqualStrings("RB", layers[0].trigger);
+    const trigger = layers[0].trigger orelse return error.TestExpectedTrigger;
+    try std.testing.expectEqualStrings("RB", trigger);
     const stick = layers[0].stick_right orelse return error.TestExpectedStick;
     try std.testing.expectEqualStrings("mouse", stick.mode);
 }

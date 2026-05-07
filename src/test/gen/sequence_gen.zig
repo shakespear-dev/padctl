@@ -108,7 +108,8 @@ fn holdLayerTrigger(cfg: ?mapping.MappingConfig) ?u64 {
     const layers = (cfg orelse return null).layer orelse return null;
     for (layers) |*l| {
         if (std.mem.eql(u8, l.activation, "hold")) {
-            return triggerNameToMask(l.trigger);
+            const trig = l.trigger orelse continue;
+            return triggerNameToMask(trig);
         }
     }
     return null;
@@ -119,7 +120,8 @@ fn toggleLayerTrigger(cfg: ?mapping.MappingConfig) ?u64 {
     const layers = (cfg orelse return null).layer orelse return null;
     for (layers) |*l| {
         if (std.mem.eql(u8, l.activation, "toggle")) {
-            return triggerNameToMask(l.trigger);
+            const trig = l.trigger orelse continue;
+            return triggerNameToMask(trig);
         }
     }
     return null;
