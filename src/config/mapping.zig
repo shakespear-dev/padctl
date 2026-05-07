@@ -300,16 +300,26 @@ pub const AdaptiveTriggerConfig = struct {
 
 pub const LayerConfig = struct {
     name: []const u8,
-    trigger: []const u8,
+    trigger: ?[]const u8 = null,
     activation: []const u8 = "hold",
     tap: ?[]const u8 = null,
     hold_timeout: ?i64 = null,
+    passthrough_trigger: ?[]const u8 = null,
     remap: ?RemapMap = null,
     gyro: ?GyroConfig = null,
     stick_left: ?StickConfig = null,
     stick_right: ?StickConfig = null,
     dpad: ?DpadConfig = null,
     adaptive_trigger: ?AdaptiveTriggerConfig = null,
+};
+
+pub const DynamicBindConfig = struct {
+    target_layer: []const u8,
+    modifier: []const []const u8,
+    hold_ms: i64 = 80,
+    trigger_threshold: ?u8 = null,
+    trigger_threshold_direction: ?[]const u8 = null,
+    release_threshold: ?u8 = null,
 };
 
 pub const MappingConfig = struct {
@@ -328,6 +338,7 @@ pub const MappingConfig = struct {
     // (byte-identical to pre-issue-333 behaviour). Applied via parse-time AST
     // rewrite in `parseString` — see `expandMacroStepDelays`.
     macro_step_delay: ?u32 = null,
+    dynamic_bind: ?DynamicBindConfig = null,
 };
 
 pub const ParseResult = toml.Parsed(MappingConfig);
@@ -513,7 +524,8 @@ fn checkRemapGestures(cfg: *const MappingConfig, map: *const RemapMap, is_base: 
         if (is_base) {
             const layers = cfg.layer orelse continue;
             for (layers) |*lc| {
-                if (std.mem.eql(u8, lc.trigger, entry.key_ptr.*)) return error.InvalidConfig;
+                const trig = lc.trigger orelse continue;
+                if (std.mem.eql(u8, trig, entry.key_ptr.*)) return error.InvalidConfig;
             }
         }
     }
@@ -985,7 +997,42 @@ test "mapping: MappingConfig: empty config" {
     try std.testing.expect(result.value.chord_index == null);
 }
 
-test "mapping: MappingConfig: chord_index parses" {
+test "mapping: LayerConfig: trigger is optional (dynamic-only layer)" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\activation = "hold"
+    );
+    defer result.deinit();
+
+    const layers = result.value.layer orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), layers.len);
+    try std.testing.expectEqual(@as(?[]const u8, null), layers[0].trigger);
+}
+
+test "mapping: MappingConfig: [dynamic_bind] parses target_layer + modifier + hold_ms" {
+    const allocator = std.testing.allocator;
+    const result = try parseString(allocator,
+        \\[[layer]]
+        \\name = "aim"
+        \\trigger = "LM"
+        \\
+        \\[dynamic_bind]
+        \\target_layer = "aim"
+        \\modifier = ["M1"]
+        \\hold_ms = 80
+    );
+    defer result.deinit();
+
+    const db = result.value.dynamic_bind orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("aim", db.target_layer);
+    try std.testing.expectEqual(@as(usize, 1), db.modifier.len);
+    try std.testing.expectEqualStrings("M1", db.modifier[0]);
+    try std.testing.expectEqual(@as(i64, 80), db.hold_ms);
+}
+
+test "mapping: MappingConfig: chord_index parses (issue #183)" {
     const allocator = std.testing.allocator;
     const result = try parseString(allocator,
         \\name = "fps"
