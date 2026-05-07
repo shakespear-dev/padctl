@@ -27,6 +27,7 @@ const rumble_scheduler_mod = @import("core/rumble_scheduler.zig");
 const RumbleScheduler = rumble_scheduler_mod.RumbleScheduler;
 const rumble_log = std.log.scoped(.rumble);
 const padctl_log = @import("log.zig");
+const panic_handler = @import("panic_handler.zig");
 const socket_client = @import("cli/socket_client.zig");
 const uhid_mod = @import("io/uhid.zig");
 pub const UhidDevice = uhid_mod.UhidDevice;
@@ -473,6 +474,36 @@ pub const EventLoop = struct {
     pub fn run(self: *EventLoop, ctx: EventLoopContext) !void {
         self.running = true;
         var buf: [512]u8 = undefined;
+
+        // Register the rumble interface (if any) with the panic-time stop
+        // emitter so a daemon crash mid-rumble does not leave the
+        // controller's motor running. The frame is built once here using
+        // the same template engine as runtime rumble emission, so the
+        // panic handler does no allocation. Best-effort: a device with
+        // no rumble template, no resolvable interface, or a build error
+        // simply doesn't get registered — non-fatal.
+        const panic_slot: ?usize = blk: {
+            const alloc = ctx.allocator orelse break :blk null;
+            const dcfg = ctx.device_config orelse break :blk null;
+            const cmds = dcfg.commands orelse break :blk null;
+            const ff_type = if (dcfg.output) |out|
+                if (out.force_feedback) |ff_cfg| ff_cfg.type else "rumble"
+            else
+                "rumble";
+            const cmd = cmds.map.get(ff_type) orelse break :blk null;
+            const iface_idx = resolveIfaceIdx(dcfg, cmd.interface) orelse break :blk null;
+            if (iface_idx >= ctx.devices.len) break :blk null;
+            const params = [_]Param{
+                .{ .name = "strong", .value = 0 },
+                .{ .name = "weak", .value = 0 },
+            };
+            const stop_bytes = fillTemplate(alloc, cmd.template, &params) catch break :blk null;
+            defer alloc.free(stop_bytes);
+            if (cmd.checksum) |*cs| applyChecksum(stop_bytes, cs);
+            const fd: i32 = @intCast(ctx.devices[iface_idx].pollfd().fd);
+            break :blk panic_handler.registerDevice(fd, stop_bytes, ctx.device_tag);
+        };
+        defer panic_handler.unregisterDevice(panic_slot);
 
         // Apply adaptive trigger config at startup (one-shot send)
         if (ctx.allocator) |alloc| {

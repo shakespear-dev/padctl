@@ -12,6 +12,22 @@ pub const ControlSocket = struct {
     path: []const u8,
     allocator: std.mem.Allocator,
 
+    /// Backing buffer for `readCommand`. Lives on the ControlSocket so the
+    /// `Command` returned by `readCommand` carries slices into stable
+    /// memory. Previously this was a function-local `[256]u8` and the
+    /// returned Command's slice fields were dangling pointers into a
+    /// freed stack frame — fine in practice for all current handlers
+    /// EXCEPT any that pass `cmd.<slice>` as a `{s}` argument to
+    /// `bufPrint(&local_buf, ..., .{cmd.<slice>})`: the local buf could
+    /// land at the same stack offset as the freed `readCommand` buf,
+    /// the format prefix would partially overwrite the dangling source
+    /// slice, and (depending on string lengths) Zig's memcpyAlias check
+    /// would fire. Moving the buffer to ControlSocket eliminates the
+    /// whole class. The supervisor reads commands single-threaded inside
+    /// `serveLoop`, and each command is fully consumed before the next
+    /// `readCommand` runs, so one shared buffer is sufficient.
+    cmd_buf: [BUF_SIZE]u8 = undefined,
+
     pub const InitError = posix.SocketError || posix.BindError || posix.ListenError || std.fs.Dir.MakeError || std.mem.Allocator.Error || error{ AlreadyRunning, ChmodFailed, PathTooLong };
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) InitError!ControlSocket {
@@ -123,8 +139,7 @@ pub const ControlSocket = struct {
     }
 
     pub fn readCommand(self: *ControlSocket, fd: posix.fd_t) ?Command {
-        var buf: [BUF_SIZE]u8 = undefined;
-        const n = posix.read(fd, &buf) catch {
+        const n = posix.read(fd, &self.cmd_buf) catch {
             self.removeClient(fd);
             return null;
         };
@@ -132,7 +147,7 @@ pub const ControlSocket = struct {
             self.removeClient(fd);
             return null;
         }
-        return parseCommand(buf[0..n]);
+        return parseCommand(self.cmd_buf[0..n]);
     }
 
     pub fn sendResponse(_: *ControlSocket, fd: posix.fd_t, msg: []const u8) void {
@@ -360,6 +375,58 @@ test "control_socket: ControlSocket: socketpair read/write" {
     const cmd = parseCommand(buf[0..n]);
     try testing.expectEqual(CommandTag.switch_mapping, cmd.tag);
     try testing.expectEqualStrings("fps", cmd.name);
+}
+
+test "control_socket: readCommand: returned slices stay valid past return + bufPrint that aliases the old stack offset" {
+    // Regression for the use-after-free pattern that previously had
+    // `readCommand` returning slices into a function-local
+    // `var buf: [BUF_SIZE]u8 = undefined`. After return, that stack
+    // frame was reusable; any handler that called `bufPrint` against a
+    // local buffer of similar size could land it at the same stack
+    // offset, the format prefix would partially overwrite the dangling
+    // source slice, and (depending on slice/buffer overlap) Zig's
+    // memcpyAlias panic would fire — see `handleBindEvent` on the
+    // dynamic-bind branch for the live case. With `cmd_buf` now on the
+    // ControlSocket struct, slice validity is decoupled from
+    // `readCommand`'s stack frame.
+    const fds = try testSocketpair();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    var cs: ControlSocket = .{
+        .listen_fd = -1,
+        .client_fds = .{ fds[0], -1, -1, -1 },
+        .client_count = 1,
+        .path = &.{},
+        .allocator = testing.allocator,
+    };
+
+    _ = try posix.write(fds[1], "SWITCH /home/user/.config/padctl/mappings/vader5.toml --device hidraw8\n");
+    const cmd = cs.readCommand(fds[0]) orelse return error.ReadFailed;
+    try testing.expectEqual(CommandTag.switch_device, cmd.tag);
+    try testing.expectEqualStrings("/home/user/.config/padctl/mappings/vader5.toml", cmd.name);
+    try testing.expectEqualStrings("hidraw8", cmd.device_id);
+
+    // Allocate a local buffer of the same size class as the old
+    // function-local one to maximise the chance of overlap with the
+    // freed `readCommand` frame on debug builds.
+    var stack_alias_probe: [256]u8 = undefined;
+    @memset(&stack_alias_probe, 0xaa);
+
+    // Format the slices back into a fresh buffer. Pre-fix this would
+    // pull bytes from `stack_alias_probe`'s territory and produce
+    // garbled output (or panic). Post-fix the slices live in
+    // `cs.cmd_buf`, which is unaffected.
+    var out: [256]u8 = undefined;
+    const formatted = try std.fmt.bufPrint(
+        &out,
+        "OK {s} {s}\n",
+        .{ cmd.name, cmd.device_id },
+    );
+    try testing.expectEqualStrings(
+        "OK /home/user/.config/padctl/mappings/vader5.toml hidraw8\n",
+        formatted,
+    );
 }
 
 test "control_socket: ControlSocket: init creates socket at exact full path" {

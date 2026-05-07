@@ -53,6 +53,16 @@ pub fn isEnabled() bool {
     return dump_enabled.load(.acquire);
 }
 
+/// Async-signal-safe accessor for the current log fd. Returns -1 when the
+/// log file is not open. Used by the panic handler to write a PANIC line to
+/// the persistent log without taking `log_mutex` (which a panicking thread
+/// might already hold). The caller is expected to write directly via
+/// `posix.write`; concurrent writes from logFn under the mutex remain safe
+/// because the underlying file is opened with `O_APPEND`.
+pub fn getLogFd() posix.fd_t {
+    return log_fd.load(.acquire);
+}
+
 /// Returns true when a message at the given level should be written to the
 /// log file. Used by logFn; exposed for testability.
 pub fn shouldWriteToFile(comptime level: std.log.Level) bool {
