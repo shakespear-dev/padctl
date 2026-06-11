@@ -149,6 +149,36 @@ ensure_user_padctl_service() {
     fi
 }
 
+# Ensure the invoking user is in the 'input' group so padctl can open the raw
+# USB node at boot via the udev GROUP="input"/MODE="0660" (applied at
+# device-add time), instead of depending on logind's session-activation
+# uaccess ACL. The uaccess ACL races the daemon's short claim-retry window at
+# boot: the daemon gives up before the ACL lands and the pad sits on
+# hid-generic (a "generic" gamepad) until a replug. Group membership has no
+# such timing dependency. Sets INPUT_GROUP_CHANGED=true only when it actually
+# adds the group, so the caller can prompt for the one-time reboot it needs.
+INPUT_GROUP_CHANGED=false
+ensure_input_group() {
+    local user
+    user="$(id -un 2>/dev/null || true)"
+    [[ -n "$user" ]] || { warn "Could not determine current user; skipping input-group check"; return 0; }
+    if ! getent group input >/dev/null 2>&1; then
+        warn "No 'input' group on this system; skipping (padctl will rely on uaccess)"
+        return 0
+    fi
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx input; then
+        ok "User '$user' already in 'input' group"
+        return 0
+    fi
+    info "Adding '$user' to the 'input' group (lets padctl claim the controller at boot)..."
+    if sudo usermod -aG input "$user"; then
+        ok "Added '$user' to 'input' group"
+        INPUT_GROUP_CHANGED=true
+    else
+        warn "Could not add '$user' to 'input' group — run manually: sudo usermod -aG input $user"
+    fi
+}
+
 sync_managed_repo_to_remote() {
     local repo="$1"
     local branch="$2"
@@ -455,6 +485,10 @@ ok "padctl installed to $PREFIX"
 info "Ensuring daemon is running as user..."
 ensure_user_padctl_service
 
+# --- 7d. Ensure raw-USB-node access at boot (fixes the "generic xpad" boot race) ---
+info "Checking controller device-access (input group)..."
+ensure_input_group
+
 # --- 7c. Apply mapping to the running daemon (config.toml persists for future boots,
 #         but the already-running daemon needs an explicit switch for the current session).
 #         Don't pin --socket to the system path — user-service installs bind
@@ -550,3 +584,22 @@ fi
 
 echo ""
 ok "Setup complete! Plug in your controller and run: padctl status"
+
+# --- 9. One-time reboot to activate input-group membership ---
+if $INPUT_GROUP_CHANGED; then
+    echo ""
+    warn "Added you to the 'input' group — this only takes effect after a reboot"
+    warn "(or a full logout/login). The controller works in THIS session already,"
+    warn "but won't be auto-claimed at the NEXT boot until that happens."
+    if [[ -t 0 ]]; then
+        read -rp "Reboot now to finish? [y/N] " yn || yn=""
+        if [[ "$yn" =~ ^[Yy] ]]; then
+            info "Rebooting..."
+            sudo reboot
+        else
+            info "Reboot later to finish: sudo reboot"
+        fi
+    else
+        info "Non-interactive shell — reboot later to finish: sudo reboot"
+    fi
+fi
