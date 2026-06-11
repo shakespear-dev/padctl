@@ -43,6 +43,16 @@ pub fn generateServiceContent(allocator: std.mem.Allocator, prefix: []const u8) 
         \\ExecStart={s}
         \\Restart=on-failure
         \\RestartSec=3
+        \\# Pin the IPC socket to the per-user runtime dir (%t = $XDG_RUNTIME_DIR
+        \\# for user units). PADCTL_SOCKET is the top-precedence override in
+        \\# resolveSocketPath, so the daemon never falls back to the root-owned
+        \\# /run/padctl — which the immutable drop-in renders read-only (only the
+        \\# runtime dir is writable there). Without this, a stale advertised file
+        \\# under /run/padctl (or an empty /run/padctl created root-owned by
+        \\# padctl-reconnect) makes bind fail with AddressInUse/EROFS and the
+        \\# daemon runs with no control socket, silently breaking
+        \\# `padctl status`/`switch`/`devices`.
+        \\Environment=PADCTL_SOCKET=%t/padctl.sock
         \\# Canonical state/log dir: $XDG_STATE_HOME/padctl on user services,
         \\# /var/lib/padctl on system services. systemd pre-creates it with
         \\# the right perms, exports $STATE_DIRECTORY, and auto-whitelists
