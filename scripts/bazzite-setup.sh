@@ -170,8 +170,28 @@ ensure_input_group() {
         ok "User '$user' already in 'input' group"
         return 0
     fi
+    # Bazzite/ostree ships 'input' only in /usr/lib/group, not /etc/group. Two
+    # consequences must both be fixed: (1) `usermod -aG input` writes /etc/group,
+    # which has no input line, so it silently records nothing; (2) systemd-udevd
+    # at early boot (coldplug) can't resolve the group (the systemd userdb isn't
+    # up yet) and logs "Unknown group 'input', ignoring", so GROUP="input" on the
+    # raw USB node is dropped and padctl can't open it at boot. Materializing the
+    # group into /etc/group — read by the always-available nss 'files' module —
+    # fixes both: usermod can record membership, and udev resolves it at coldplug.
+    if ! grep -q '^input:' /etc/group; then
+        local gid
+        gid="$(getent group input | cut -d: -f3 || true)"
+        if [[ -n "$gid" ]]; then
+            info "Materializing 'input' group into /etc/group (gid $gid) for early-boot udev + usermod..."
+            if echo "input:x:${gid}:" | sudo tee -a /etc/group >/dev/null; then
+                ok "Added 'input' to /etc/group"
+            else
+                warn "Could not write /etc/group — controller may stay on hid-generic at boot"
+            fi
+        fi
+    fi
     info "Adding '$user' to the 'input' group (lets padctl claim the controller at boot)..."
-    if sudo usermod -aG input "$user"; then
+    if sudo usermod -aG input "$user" && id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx input; then
         ok "Added '$user' to 'input' group"
         INPUT_GROUP_CHANGED=true
     else
