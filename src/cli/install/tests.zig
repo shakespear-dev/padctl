@@ -277,6 +277,25 @@ test "install: generateServiceContent is user unit" {
     try testing.expect(std.mem.indexOf(u8, content, "User=") == null);
 }
 
+test "install: generateServiceContent pins IPC socket to user runtime dir (PADCTL_SOCKET)" {
+    // The daemon must bind $XDG_RUNTIME_DIR/padctl.sock, never the root-owned
+    // /run/padctl fallback: under the immutable drop-in's ProtectHome=read-only
+    // + ReadWritePaths=/run/user/%U, /run/padctl is read-only in the service's
+    // namespace, so a fallback there fails bind (EADDRINUSE/EROFS) and the CLI
+    // can't connect. Forcing PADCTL_SOCKET=%t/padctl.sock (top precedence in
+    // resolveSocketPath; %t = $XDG_RUNTIME_DIR for user units) makes the path
+    // deterministic and always writable.
+    // Falsifiability: drop the Environment line from generateServiceContent and
+    // this fails.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    for ([_][]const u8{ "/usr", "/usr/local" }) |prefix| {
+        const content = try generateServiceContent(allocator, prefix);
+        defer allocator.free(content);
+        try testing.expect(std.mem.indexOf(u8, content, "Environment=PADCTL_SOCKET=%t/padctl.sock") != null);
+    }
+}
+
 test "install: generateServiceContent never emits SupplementaryGroups (issues #287/#288)" {
     // A systemd --user service manager runs unprivileged (no CAP_SETGID) and
     // cannot apply SupplementaryGroups=; the directive aborts startup with
